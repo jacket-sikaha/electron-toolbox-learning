@@ -1,3 +1,6 @@
 allowBuilds:
   electron: true
   esbuild: false
+minimumReleaseAgeExclude:
+  - electron@44.7.0
+lockfile: false

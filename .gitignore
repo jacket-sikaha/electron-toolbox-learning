@@ -35,3 +35,6 @@ Thumbs.db
 # Cache
 .electron-cache
 cache
+
+# Tool artifacts (DSH WorkBuddy etc.)
+.workbuddy/
