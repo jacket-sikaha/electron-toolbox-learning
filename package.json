@@ -26,8 +26,5 @@
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
-  },
-  "config": {
-    "electron_mirror": "https://npmmirror.com/mirrors/electron/"
   }
 }

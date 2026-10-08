@@ -4,21 +4,21 @@
 
 ## Architecture 架构设计
 
-- [x] 🟡 进程模型 Main / Renderer / Preload 三者职责与边界
-- [x] 🟡 Preload 最小暴露原则
-- [ ] 🔴 IPC 通信架构(ipcMain / ipcRenderer / contextBridge 数据流)—— 🎯 阶段 2 目标
+- [x] ✅ 进程模型 Main / Renderer / Preload 三者职责与边界
+- [x] ✅ Preload 最小暴露原则
+- [x] ✅ IPC 通信架构(ipcMain / ipcRenderer / contextBridge 数据流)—— 阶段 2 完成
 - [ ] 🔴 多窗口架构(主窗口/子窗口/隐藏窗口/工具进程)—— 阶段 5
 - [ ] 🔴 插件化扩展架构(无限扩展工具箱核心命题)—— 阶段 5
-- [ ] 🔴 进程隔离与信任边界 —— 阶段 2 巩固
+- [x] ✅ 进程隔离与信任边界 —— 阶段 2 巩固
 
 ## Core 重点基础
 
 - [x] 🟡 BrowserWindow 创建与配置(webPreferences 安全配置)
 - [x] 🟡 dev/prod 加载方式差异(loadURL vs loadFile 本质)
 - [x] ✅ app.whenReady() 生命周期时机
-- [ ] 🔴 ipcMain 通信机制 —— 🎯 阶段 2 目标
-- [ ] 🔴 ipcRenderer 通信机制 —— 🎯 阶段 2 目标
-- [ ] 🔴 contextBridge.exposeInMainWorld —— 🎯 阶段 2 目标
+- [x] ✅ ipcMain.handle 通信机制 —— 阶段 2 完成
+- [x] ✅ ipcRenderer.invoke 通信机制 —— 阶段 2 完成
+- [x] ✅ contextBridge.exposeInMainWorld —— 阶段 2 完成
 - [ ] 🔴 完整 app 生命周期(ready/window-all-closed/before-quit/will-quit)—— 阶段 3
 - [ ] 🔴 WebContents 状态与事件 —— 阶段 3
 - [ ] 🔴 Dialog / Menu / Tray / Shell / SystemPreferences —— 阶段 3
@@ -29,9 +29,9 @@
 
 - [x] 🟡 nodeIntegration 配置错误导致 RCE(原理理解)
 - [x] 🟡 contextIsolation 配置错误的危害
-- [x] 🟡 Preload 暴露 API 过大的风险
-- [ ] 🔴 IPC 未校验输入 = 主进程注入 —— 🎯 阶段 2 目标
-- [ ] 🔴 路径穿越攻击(渲染进程传相对/绝对路径)—— 阶段 2
+- [x] ✅ Preload 暴露 API 过大的风险 —— 阶段 2 实操
+- [x] ✅ IPC 未校验输入 = 主进程注入 —— 阶段 2 理解(方案 2 规避)
+- [x] ✅ 路径穿越攻击(渲染进程传相对/绝对路径)—— 阶段 2 理解(方案 2 规避)
 - [ ] 🔴 ipcMain.on 监听泄漏 —— 阶段 3
 - [ ] 🔴 Zombie 进程(窗口关闭但子进程未退)—— 阶段 3
 - [ ] 🔴 stale state(渲染进程重载后旧回调仍触发)—— 阶段 3
@@ -67,7 +67,7 @@
 | 阶段 | 主题 | 状态 | 完成度 |
 |------|------|------|--------|
 | 1 | 地基:进程模型 + 最小实现 | ✅ 完成 | 100% |
-| 2 | IPC 与安全边界(Base64/URL) | 🚧 进行中 | 0% |
+| 2 | IPC 与安全边界(Base64/URL) | ✅ 完成 | 100% |
 | 3 | 生命周期与系统工具(Tray/Menu) | ⏳ 待开始 | 0% |
 | 4 | 大文件与异步(Worker Threads) | ⏳ 待开始 | 0% |
 | 5 | 插件化扩展架构 | ⏳ 待开始 | 0% |

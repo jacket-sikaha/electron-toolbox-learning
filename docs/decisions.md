@@ -70,4 +70,36 @@ Electron 应用默认配置下 Renderer 拥有 Node 能力(nodeIntegration:true)
 
 ---
 
+## ADR-003:阶段 2 IPC 架构与安全设计
+
+**状态**:✅ Accepted
+**日期**:2026-10-08
+
+### 背景
+
+Base64 工具需要读本地文件,Renderer 在安全配置下没有 `fs` / `dialog` 等 Node API,必须通过 IPC 让 Main 干活。需要设计 Preload API 签名和防御策略。
+
+### 决策
+
+1. **方案 2:零入参 API** —— `selectAndReadFile()` 不接收 path,Main 内部 `dialog` 选完直接读
+2. **API 合并**:选文件 + 读文件合并为一个原子操作,不暴露 `readFile(path)`
+3. **channel 命名**:`tool:select-and-read-file`,`tool:` 前缀分组
+4. **handle/invoke 而非 on/send**:双向通信 + Promise,异步友好
+5. **纵深防御**:Main 侧加 10MB 文件大小限制(阶段 4 改 Stream)
+
+### 理由
+
+1. **零入参 = 零攻击面**:Renderer 不传 path,无法伪造路径,天然防路径穿越
+2. **API 合并减少暴露面**:暴露 `readFile(path)` 会让 path 成为攻击向量
+3. **handle/invoke 是 Electron 推荐姿势**:返回 Promise,比 on/send 的回调风格更安全
+4. **纵深防御**:即使方案 2 天然安全,Main 仍守文件大小边界,防 OOM
+
+### 后果
+
+- Renderer 拿不到 path,无法自行选择读哪个文件(安全特性,非缺陷)
+- 文件大小限制 10MB,大文件需等阶段 4 Stream 改造
+- 后续工具增多后,channel 命名的 `tool:` 前缀分组会发挥作用
+
+---
+
 (后续 ADR 持续追加)
