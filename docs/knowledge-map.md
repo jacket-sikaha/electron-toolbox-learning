@@ -79,6 +79,10 @@
 (随学习推进更新,用于复习时定向巩固)
 
 - postinstall 失败的「软失败」行为:pnpm 某些版本/配置下 install 整体退出码 0,但二进制没下来,要靠 `pnpm dev` 才暴露
+- handle/invoke 精确描述:注册/调用,不是订阅/发布(发布订阅是 on/send)
+- XSS vs 路径穿越:两种完全不同的攻击类型,防御方式不同,不能混叫(阶段 2 知识检查纠正)
+- contextIsolation 核心价值:隔离两个 JS 上下文,防 Monkey Patching 攻击(暴露的 API 是只读副本)
+- Base64 膨胀率 ×1.37,5MB → 6.85MB 是正常的,不是 Bug(阶段 4 大文件会反复用到)
 
 ## 已遇到的 Bug
 
