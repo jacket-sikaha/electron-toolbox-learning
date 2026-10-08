@@ -79,10 +79,13 @@
 (随学习推进更新,用于复习时定向巩固)
 
 - postinstall 失败的「软失败」行为:pnpm 某些版本/配置下 install 整体退出码 0,但二进制没下来,要靠 `pnpm dev` 才暴露
-- handle/invoke 精确描述:注册/调用,不是订阅/发布(发布订阅是 on/send)
-- XSS vs 路径穿越:两种完全不同的攻击类型,防御方式不同,不能混叫(阶段 2 知识检查纠正)
-- contextIsolation 核心价值:隔离两个 JS 上下文,防 Monkey Patching 攻击(暴露的 API 是只读副本)
-- Base64 膨胀率 ×1.37,5MB → 6.85MB 是正常的,不是 Bug(阶段 4 大文件会反复用到)
+
+## 已巩固(曾为薄弱点,已通过复述检查)
+
+- ✅ handle/invoke 精确描述:注册/调用,不是订阅/发布(发布订阅是 on/send)。channel 名不一致 → Main 端无人 handle → Promise 永远 pending,不报错不超时
+- ✅ XSS vs 路径穿越:两种完全不同的攻击类型。XSS 攻渲染进程,路径穿越攻文件系统。二层防御里 Preload 校验防的是路径穿越
+- ✅ contextIsolation 核心价值:Preload 与 Renderer 是两个独立 window 对象,exposeInMainWorld 是「复印一份」,页面改不动原件,防 Monkey Patching
+- ✅ Base64 膨胀率 ×1.37:3 字节 → 4 字符,5MB → 6.85MB 是正常设计,不是 Bug(阶段 4 大文件的关键约束)
 
 ## 已遇到的 Bug
 
