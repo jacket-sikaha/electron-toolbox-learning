@@ -19,7 +19,7 @@
 - [x] ✅ ipcMain.handle 通信机制 —— 阶段 2 完成
 - [x] ✅ ipcRenderer.invoke 通信机制 —— 阶段 2 完成
 - [x] ✅ contextBridge.exposeInMainWorld —— 阶段 2 完成
-- [ ] 🔴 完整 app 生命周期(ready/window-all-closed/before-quit/will-quit)—— 阶段 3
+- [x] ✅ 完整 app 生命周期(ready / window-all-closed / close 拦截 / quit-exit-destroy 区别)—— 阶段 3 进行中
 - [ ] 🔴 WebContents 状态与事件 —— 阶段 3
 - [ ] 🔴 Dialog / Menu / Tray / Shell / SystemPreferences —— 阶段 3
 - [ ] 🔴 globalShortcut / clipboard / powerMonitor —— 阶段 3
