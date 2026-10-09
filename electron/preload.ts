@@ -44,6 +44,20 @@ export interface SystemInfo {
   uptime: number;
 }
 
+// 阶段 4:大文件处理结果
+export interface BigBase64Result {
+  base64: string;
+  name: string;
+  originalSize: number;
+  base64Size: number;
+}
+
+// 阶段 4:进度事件负载
+export interface Base64Progress {
+  processed: number;
+  total: number;
+}
+
 contextBridge.exposeInMainWorld("electronAPI", {
   // 阶段 2:Base64 工具用的 API
   // 调用 ipcRenderer.invoke,channel 名必须与 main.ts 里 ipcMain.handle 一致
@@ -57,4 +71,35 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // 阶段 3:隐藏当前窗口(托盘应用:最小化到托盘)
   // 零入参 —— Renderer 只能说「隐藏我这个窗口」,不能指定隐藏别的窗口
   hideWindow: (): Promise<void> => ipcRenderer.invoke("window:hide"),
+
+  // 阶段 4:大文件 Base64(Stream + Worker)
+  bigBase64: (): Promise<BigBase64Result | null> =>
+    ipcRenderer.invoke("tool:big-base64"),
+
+  // 阶段 4:订阅进度推送 —— IPC 的第二种模式(单向推送)
+  //
+  // 关键设计:必须返回「取消订阅」函数,否则监听器会累积泄漏。
+  //
+  // 为什么这是必须的?
+  //   React 组件每次挂载都会调 onBase64Progress 注册一个监听器。
+  //   如果组件卸载时不移除,下次再挂载又注册一个 —— 同一时刻可能有 N 个监听器。
+  //   结果是:一次进度推送会触发 N 次回调,进度条乱跳,甚至状态错乱。
+  //   这就是知识地图里的「ipcMain.on 监听泄漏」。
+  //
+  // 用法(Renderer 侧):
+  //   const unsubscribe = window.electronAPI.onBase64Progress(cb);
+  //   组件卸载时:unsubscribe();
+  onBase64Progress: (
+    callback: (data: Base64Progress) => void
+  ): (() => void) => {
+    // 注意:必须包一层 wrapper,不能直接把 callback 交给 ipcRenderer.on。
+    // 因为 ipcRenderer 的监听器签名是 (event, ...args),直接传 callback 会
+    // 把 IpcRendererEvent 对象当成第一个参数,污染业务回调的参数。
+    const listener = (_event: unknown, data: Base64Progress) => callback(data);
+    ipcRenderer.on("base64:progress", listener);
+    // 返回取消订阅函数
+    return () => {
+      ipcRenderer.removeListener("base64:progress", listener);
+    };
+  },
 });

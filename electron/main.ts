@@ -16,8 +16,10 @@ import {
   nativeImage,
 } from "electron";
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { basename } from "node:path";
+import { Worker } from "node:worker_threads";
 import os from "node:os";
 
 // 关键设计 1:__dirname 在 CommonJS 环境下可直接用
@@ -183,13 +185,13 @@ function registerIpcHandlers() {
     // - 限制文件大小:避免用户选了一个 10GB 文件把 Main 进程 OOM
     // - 这是「纵深防御」的体现:方案 2 防住了路径穿越,
     //   但「文件大小」这个边界仍要在 Main 守
-    // 阶段 2 先用简单 size 检查,阶段 4 大文件会改用 Stream
-    const { stat } = await import("node:fs/promises");
+    // 阶段 4 起,小文件走这个 handler(有 10MB 限制),
+    // 大文件走下面的 tool:big-base64(Stream + Worker,无大小限制)
     const stats = await stat(filePath);
     const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
     if (stats.size > MAX_FILE_SIZE) {
       throw new Error(
-        `文件过大(${(stats.size / 1024 / 1024).toFixed(2)}MB),当前阶段限制 10MB 以内。阶段 4 会用 Stream 支持大文件。`
+        `文件过大(${(stats.size / 1024 / 1024).toFixed(2)}MB),这个工具限制 10MB 以内。请改用「大文件 Base64」(Stream + Worker)。`
       );
     }
 
@@ -201,6 +203,184 @@ function registerIpcHandlers() {
     // - Buffer 通过 IPC 传输时会被自动序列化为 Uint8Array
     // - Renderer 拿到后用 btoa 或 TextDecoder 转 Base64
     return { buffer, name };
+  });
+
+  // ==========================================================================
+  // 阶段 4:大文件 Base64 —— Stream + Worker 组合拳
+  // ==========================================================================
+  //
+  // 关键设计 6.7:这个 handler 和上面的 select-and-read-file 有什么本质区别?
+  //
+  //   阶段 2 的版本(小文件):
+  //     fs.readFile 一次性读入内存 → 返回整个 Buffer
+  //     内存占用 = O(文件大小),且 Base64 编码在 Renderer 做
+  //
+  //   阶段 4 的版本(大文件):
+  //     Stream 分块读 → 每块丢给 Worker 编码 → 分块累积结果
+  //     内存占用 = O(块大小),编码在 Worker 线程做(不占主线程)
+  //
+  // 关键设计 6.8:进度推送为什么不能用 invoke 的返回值?
+  //   invoke 是「一次调用 → 一个返回值」。进度是「一次调用 → 多次更新」。
+  //   所以进度必须走 webContents.send(单向推送),返回值只用来给最终结果。
+  //   这是 IPC 的第二种模式(阶段 4 新知识)。
+  ipcMain.handle("tool:big-base64", async (event) => {
+    const result = await dialog.showOpenDialog({
+      title: "选择大文件(Stream + Worker 处理)",
+      properties: ["openFile"],
+      filters: [{ name: "所有文件", extensions: ["*"] }],
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+
+    const filePath = result.filePaths[0];
+    const stats = await stat(filePath);
+    const name = basename(filePath);
+    const totalBytes = stats.size;
+
+    // 关键设计 6.9:块大小必须是 3 的倍数 —— 阶段 4 最硬的技术约束
+    //
+    // 为什么?Base64 是「3 字节 → 4 字符」。
+    //   如果块大小是 3 的倍数,每块单独编码后长度都是 4 的倍数,不含 padding,
+    //   直接拼接就是正确结果。
+    //   如果块大小不是 3 的倍数,每块末尾会补 padding(=),
+    //   拼接后中间的 padding 会把整体结构破坏掉,解码直接失败。
+    //
+    // 3 * 1024 * 1024 = 3145728 字节,是 3 的倍数(同时也是 1MB 的整数倍)。
+    const BLOCK_SIZE = 3 * 1024 * 1024;
+
+    // 关键设计 6.9.1:防御性断言 —— 把 Bug-A 的教训变成代码护栏
+    //
+    // 这条断言是 Bug-A 注入实验的直接产物(docs/bug-lab.md)。
+    // 实验证明:曾有人把 BLOCK_SIZE 随手改成 1MB(1048576,%3=1),
+    // 结果每个中间块编码后都带 padding,拼接后 ~29% 处的 '=' 让解码器提前终止,
+    // 3.5MB 的文件解码出来只剩 1MB —— 全程不报错,进度条正常,膨胀率正常。
+    //
+    // 为什么用「运行时断言」而不是「靠注释提醒」?
+    //   注释会被忽略,断言不会。任何未来修改 BLOCK_SIZE 的人(包括未来的你,
+    //   或者某个 AI 助手)都会在第一次运行时立刻撞上这条断言,而不是
+    //   在生产环境收到「用户说文件坏了」的工单。
+    //
+    // 这就是「把 Bug 转化成护栏」:每修一个隐蔽 Bug,就加一条能防止它复发的断言。
+    if (BLOCK_SIZE % 3 !== 0) {
+      throw new Error(
+        `[致命错误] BLOCK_SIZE 必须是 3 的倍数(当前 ${BLOCK_SIZE},余 ${BLOCK_SIZE % 3})。` +
+          `Base64 按 3 字节分组编码,非 3 倍数会导致中间块带 padding,拼接结果静默损坏。` +
+          `参考 docs/bug-lab.md 的 Bug-A。`
+      );
+    }
+
+    // 关键设计 6.10:创建 Worker —— 把 CPU 密集的编码搬离主线程
+    //
+    // Worker 的文件路径:base64-worker.js 会被编译到 dist-electron/,
+    // 而 main.js 也在 dist-electron/,所以用 __dirname 直接拼。
+    const workerPath = join(__dirname, "base64-worker.js");
+    const worker = new Worker(workerPath);
+
+    // 关键设计 6.11:Worker 通信的「请求-响应配对」机制
+    //
+    // Worker 的消息是异步返回的,而且顺序不保证。
+    // 我们用递增的 taskId 标记每个任务,用 Map 记录「哪些任务还没完成」。
+    // 只有收到结果时才知道哪个任务完成了 —— 这是 Worker 编程的标配模式。
+    const pending = new Map<
+      number,
+      (base64: string) => void // resolve 函数
+    >();
+    let taskId = 0;
+
+    worker.on("message", (msg: { id: number; base64: string }) => {
+      const resolve = pending.get(msg.id);
+      if (resolve) {
+        pending.delete(msg.id); // 收到结果就移除,避免 Map 无限增长
+        resolve(msg.base64);
+      }
+    });
+
+    worker.on("error", (err) => {
+      console.error("[main] worker error:", err);
+    });
+
+    // 把一块数据交给 Worker 编码,返回 Promise<string>
+    //
+    // mustAlign:告诉 Worker「这一块是不是中间块」。中间块的长度必须是 3 的倍数,
+    // 末块允许任意长度 —— 由主线程判断后传给 Worker,让 Worker 能独立做断言。
+    function encodeChunk(chunk: Buffer, mustAlign: boolean): Promise<string> {
+      const id = taskId++;
+      return new Promise((resolve) => {
+        pending.set(id, resolve);
+        // 注意:chunk 通过 structured clone 复制传给 Worker(有拷贝开销)
+        worker.postMessage({ id, chunk, mustAlign });
+      });
+    }
+
+    // 关键设计 6.12:进度推送 —— 节流
+    //
+    // 为什么要节流?如果每读一块就 send 一次,100MB / 3MB ≈ 34 次,还好。
+    // 但如果块更小(比如 64KB),就是 1600 次 IPC —— 会把 IPC 通道打满。
+    // 这里用「时间节流」:最多每 100ms 推一次进度。
+    let lastProgressAt = 0;
+    function sendProgress(processed: number) {
+      const now = Date.now();
+      if (now - lastProgressAt < 100 && processed < totalBytes) return;
+      lastProgressAt = now;
+      event.sender.send("base64:progress", {
+        processed,
+        total: totalBytes,
+      });
+    }
+
+    // 关键设计 6.13:主流程 —— Stream 分块读 + 逐块交给 Worker
+    //
+    // 这里用 for await...of 遍历 Stream,每次拿到一个 chunk(大小最多 BLOCK_SIZE)。
+    // 因为是 for await,循环会自动「背压(backpressure)」——
+    //   读一块 → 等它编码完 → 再读下一块
+    // 这样内存里始终只有一块数据 + 它的编码结果,不会堆积。
+    const stream = createReadStream(filePath, { highWaterMark: BLOCK_SIZE });
+    const parts: string[] = [];
+    let processed = 0;
+
+    try {
+      for await (const chunk of stream) {
+        // chunk 是 Buffer;createReadStream 的 highWaterMark 保证它最多 BLOCK_SIZE,
+        // 但不保证「最后一块」也是 3 的倍数 —— 这是正常的,最后一块本来就短。
+        // 由于前面的块都是 3 的倍数,「最后一块」单独编码后带 padding 也是正确的
+        // (它本来就是整段数据的结尾)。
+        //
+        // mustAlign:processed + 本块长度 < totalBytes 说明后面还有数据 → 这是中间块,
+        // 长度必须是 3 的倍数(由上面的 BLOCK_SIZE 断言保证)。
+        const buf = chunk as Buffer;
+        const mustAlign = processed + buf.length < totalBytes;
+        const base64 = await encodeChunk(buf, mustAlign);
+        parts.push(base64);
+
+        processed += buf.length;
+        sendProgress(processed);
+      }
+    } finally {
+      // 关键设计 6.14:Worker 必须显式终止,否则它会一直活着
+      //
+      // 这是阶段 3「资源释放」知识的延续:
+      //   Worker 是一个真实的 OS 线程,不 terminate 它就不会退出。
+      //   如果每次调用都 new Worker 却从不 terminate,
+      //   用户点 10 次工具就泄漏 10 个线程 —— 内存和 CPU 双双上涨。
+      //   所以放在 finally 里,保证「无论成功还是抛错」都能清理。
+      await worker.terminate();
+    }
+
+    // 关键设计 6.15:所有块拼接
+    // 因为每块的 base64 都是 4 的倍数长度(3 的倍数输入 → 4 字符/3字节),
+    // 直接 join 就是完整正确的 Base64。
+    const base64 = parts.join("");
+
+    // 关键设计 6.16:返回结果时带上「统计信息」
+    // 让 Renderer 能验证:输出长度是否符合 ×1.37 膨胀率(阶段 2 学过的常识)
+    return {
+      base64,
+      name,
+      originalSize: totalBytes,
+      base64Size: base64.length,
+    };
   });
 
   // 关键设计 6.5:阶段 3 系统信息工具 —— 零入参、零风险

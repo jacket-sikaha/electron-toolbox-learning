@@ -72,6 +72,22 @@ function onElectronStart(kind: "main" | "preload", { startup, reload }: OnStartA
 // vite-plugin-electron 会把 electron/main.ts 和 electron/preload.ts
 // 单独编译成 CommonJS,输出到 dist-electron/,与 package.json 的 main 字段对齐。
 // ============================================================================
+// ============================================================================
+// 关键设计 4(阶段 4):Worker 也必须作为独立 entry 构建
+// ----------------------------------------------------------------------------
+// Worker 是一个「独立的运行单元」:它跑在单独的线程里,有自己的入口文件。
+// vite-plugin-electron 只构建 entry 列表里明确列出的文件 ——
+// 如果忘了加这条,dist-electron/base64-worker.js 根本不会生成,
+// new Worker(join(__dirname, 'base64-worker.js')) 会直接抛错:
+//   "Cannot find module .../dist-electron/base64-worker.js"
+//
+// 工程规律:每新增一个「运行单元」(主进程 / 预加载 / Worker / 子进程),
+//           就要同步在构建配置里登记它。这是新手最常漏的一步。
+//
+// onstart 不传:Worker 不需要拉起 Electron,它由主进程在运行时按需创建。
+// 热更新行为:改 Worker 代码 → 重新构建 → 下次主进程 new Worker() 时用新代码。
+//            已经创建中的 Worker 不会自动更新(因为线程已经在跑了)。
+// ============================================================================
 export default defineConfig({
   plugins: [
     react(),
@@ -91,6 +107,19 @@ export default defineConfig({
       {
         entry: "electron/preload.ts",
         onstart: (api) => onElectronStart("preload", api),
+        vite: {
+          build: {
+            outDir: "dist-electron",
+            rollupOptions: {
+              external: ["electron"],
+            },
+          },
+        },
+      },
+      {
+        // 阶段 4:Worker 线程入口
+        entry: "electron/base64-worker.ts",
+        // 不加 onstart —— Worker 不需要承担「启动 Electron」的职责
         vite: {
           build: {
             outDir: "dist-electron",
