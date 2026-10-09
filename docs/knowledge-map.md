@@ -79,6 +79,8 @@
 (随学习推进更新,用于复习时定向巩固)
 
 - postinstall 失败的「软失败」行为:pnpm 某些版本/配置下 install 整体退出码 0,但二进制没下来,要靠 `pnpm dev` 才暴露
+- Electron 事件名易混:close(窗口即将关闭,可拦截)vs closed(已销毁)vs before-quit(app 即将退出)—— 阶段 3 知识检查纠正
+- Tray/Window 引用必须模块级持有,局部变量会被 GC 回收导致图标/窗口消失 —— 阶段 3 知识检查纠正
 
 ## 已巩固(曾为薄弱点,已通过复述检查)
 
@@ -90,3 +92,4 @@
 ## 已遇到的 Bug
 
 - Bug-001:Electron 二进制安装失败(postinstall 网络超时)→ 见 `bug-lab.md`
+- Bug-002:托盘应用退出顺序错误导致「僵尸状态」→ 见 `bug-lab.md`
