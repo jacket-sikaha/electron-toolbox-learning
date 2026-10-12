@@ -1,45 +1,21 @@
 // SystemInfoTool.tsx —— 阶段 3:系统信息工具
 //
-// 这是阶段 3 的「热身工具」,用来验证 IPC 已经能跑通新链路。
+// ────────────────────────────────────────────────────────────────────────
+// 阶段 5 变化:
+//   阶段 4:  await window.electronAPI.getSystemInfo()
+//   阶段 5:  await ctx.system!.getInfo()
 //
-// 但它有一个重要的教学价值:它让我们看到「哪些数据必须走 Main」。
-//   - platform / arch / cpu / mem / versions → 全部是 Node API,Renderer 没有
-//   - 这些数据有个共同特点:只读、无入参、无副作用 → IPC 里最安全的一类
+//   同一个工具用了【两个】能力,所以 manifest 里声明了两条权限:
+//     permissions: ["sys:info", "window:hide"]
+//   而 ctx 恰好组出了两个命名空间:
+//     { system: {...}, window: {...} }
 //
-// 对比阶段 2 的 Base64 工具:那个有「读文件」这个有副作用的操作,
-// 所以要做大小限制、路径防御。这个工具什么都不改,零风险。
+//   ⚠️ 注意这里的对应关系是「一个能力 = 一个 ctx 命名空间」,
+//      不是「一条权限 = 一个方法」。permissions 的粒度决定了裁剪粒度。
+// ────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState } from "react";
-
-// 与 preload.ts 的 SystemInfo 保持一致的本地类型
-interface SystemInfo {
-  platform: string;
-  arch: string;
-  cpuModel: string;
-  cpuCount: number;
-  totalMem: number;
-  freeMem: number;
-  hostname: string;
-  osVersion: string;
-  electronVersion: string;
-  chromeVersion: string;
-  nodeVersion: string;
-  appVersion: string;
-  uptime: number;
-}
-
-declare global {
-  interface Window {
-    electronAPI: {
-      selectAndReadFile: () => Promise<{
-        buffer: Uint8Array;
-        name: string;
-      } | null>;
-      getSystemInfo: () => Promise<SystemInfo>;
-      hideWindow: () => Promise<void>;
-    };
-  }
-}
+import type { SystemInfo, ToolProps } from "./types";
 
 // 把字节数格式化成人类可读的 GB / MB
 function formatBytes(bytes: number): string {
@@ -58,7 +34,7 @@ function formatUptime(seconds: number): string {
   return `${minutes} 分钟`;
 }
 
-export function SystemInfoTool() {
+export function SystemInfoTool({ ctx }: ToolProps) {
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -67,12 +43,13 @@ export function SystemInfoTool() {
     setLoading(true);
     setError(null);
     try {
-      // 这里就是阶段 3 的新 IPC 链路:
-      // window.electronAPI.getSystemInfo()
+      // 这里就是阶段 3 的 IPC 链路(阶段 5 起经由 ctx 能力视图):
+      // ctx.system.getInfo()
+      //   → context-factory 的 makeSystemApi()
       //   → ipcRenderer.invoke('tool:get-system-info')
       //   → Main 的 ipcMain.handle 里调 os.cpus() / os.totalmem() / process.versions
       //   → 返回纯 JS 对象(全部可序列化,不像 Buffer 需要特殊处理)
-      const data = await window.electronAPI.getSystemInfo();
+      const data = await ctx.system!.getInfo();
       setInfo(data);
     } catch (e) {
       setError((e as Error).message);
@@ -81,15 +58,11 @@ export function SystemInfoTool() {
     }
   }
 
-  // 组件挂载时自动加载一次
-  //
-  // ⚠️ 注意:这里的 useEffect 依赖数组是空的([])。
-  //    在 React 严格模式下,开发环境会故意执行两次 effect(挂载→卸载→再挂载)。
-  //    这里没有清理函数,所以会发两次 IPC 请求 —— 功能上无害(只读接口),
-  //    但如果以后这里是「写文件」之类的有副作用操作,就会重复执行!
-  //    阶段 4 我们会用一个真实 Bug 来演示这个问题。
+  // 挂载时自动加载一次
   useEffect(() => {
-    loadInfo();
+    void loadInfo();
+    // 只在挂载时跑一次:loadInfo 是稳定引用,不需要进依赖数组
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const usedMem = info ? info.totalMem - info.freeMem : 0;
@@ -104,7 +77,7 @@ export function SystemInfoTool() {
             {loading ? "读取中..." : "刷新"}
           </button>
           <button
-            onClick={() => window.electronAPI.hideWindow()}
+            onClick={() => ctx.window!.hide()}
             title="隐藏到系统托盘(从托盘图标可以唤回)"
           >
             隐藏到托盘
@@ -232,6 +205,11 @@ export function SystemInfoTool() {
               但它们<span style={{ color: "#dcdcaa" }}>只读、无入参、无副作用</span>
               ,是 IPC 里最安全的一类 —— 对比 Base64 工具的「读文件」,那个有副作用,
               所以需要文件大小限制和路径防御。
+              <br />
+              <br />
+              阶段 5:本工具声明了 <code>["sys:info", "window:hide"]</code>,
+              所以框架给它的 ctx 里有 <code>system</code> 和 <code>window</code>{" "}
+              两个命名空间 —— 但也仅此而已。
             </div>
           </>
         )}

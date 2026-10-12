@@ -175,4 +175,87 @@ Base64 工具需要读本地文件,Renderer 在安全配置下没有 `fs` / `dia
 
 ---
 
+## ADR-007: 工具契约与权限模型(阶段 5)
+
+**状态**:✅ Accepted
+**日期**:2026-10-08
+
+### 背景
+
+阶段 4 结束时,4 个工具全部硬编码在 [src/App.tsx](../src/App.tsx)(侧边栏按钮 + 渲染分支各一处),Main 端也逐个手写 handler;而 [electron/preload.ts](../electron/preload.ts) 把**全部能力**一次性 `exposeInMainWorld`,导致 JSON Formatter(纯前端字符串处理)也能调到 `bigBase64()` —— 最小权限原则被违反。
+
+需要一套「工具可插拔 + 权限可声明」的架构,为未来开放第三方插件打地基。
+
+### 决策
+
+1. **编译时注册,不做运行时加载(方案 A)** —— 工具是源码模块,通过 import 数组注册
+2. **单一数据源 + 声明与实现分离**:
+   - `shared/tool-manifest.ts` 只放**纯数据**(`meta` + `permissions`),Main 与 Renderer 各自 import
+   - `src/tools/index.ts` 放 `id → React 组件` 映射,**只在 Renderer**
+3. **`ctx` 能力注入**:工具只接收 `ctx`,永不直接接触 `ipcRenderer`
+4. **`ctx` 在 Renderer 按 `permissions` 裁剪组装**,Main 不组装(技术上也不可能 —— 函数不可跨 IPC 序列化)
+5. **Main 三层权限校验**:①通道存在性(没声明 → 通道不注册)②来源校验(`event.sender`)③入参校验
+6. **身份标识不来自入参**:禁止用 `args.toolId` 做校验
+
+### 理由
+
+1. **单一数据源避免两端不同步**:各存一份会出现「UI 显示有权限、Main 校验说没权限」这类极难排查的 Bug;共享纯数据文件让 TypeScript 在**编译期**保证一致
+2. **声明与实现分离是分期演进的接口位**:共享的只有元数据,组件映射留在 Renderer。阶段 7 做懒加载时这里是插入 `React.lazy()` 的位置;迁移到 B 方案时这里是「加载器」要替换的位置 —— **契约不变,只是数据来源变**
+3. **ctx 必须在 Renderer 组装是技术约束而非选择**:IPC 只能传数据(结构化克隆),函数不可序列化
+4. **ctx 的真正价值是「裁剪」不是「封装」**:`electronAPI` 按功能命名且一次性全暴露;`ctx` 按能力命名且按工具裁剪 —— 无权限的工具拿到的 `ctx` 是 `{}`
+5. **身份必须来自框架或物理不存在**:入参里的 `toolId` 由调用方填写可任意伪造;`event.sender` 由运行时注入不可篡改;未注册的通道则根本调不通
+6. **A 到 B 是连续迁移不是重写**:两者架构契约完全相同,B 只多一个加载器(≈100 行)。**没有权限模型的运行时加载 = 纯粹的安全漏洞**,所以应先理解权限模型再做 B
+
+### 后果
+
+- 加一个工具只需改 2 个文件(manifest 一条 + 组件映射一行),侧边栏自动出现
+- 权限从「隐式散落在实现里」变成「集中显式声明」,可 `filter()` 查询影响面、可自动生成文档、满足商店上架的能力清单要求
+- **A 阶段 `permissions` 只是声明不是强制** —— 编译时注册下所有代码可信,工具可直接 `import("node:fs")` 绕过;真正的强制要等 B 阶段
+- 遗留:`ctx` 的裁剪在 Renderer 执行,**理论上可被 Renderer 内部代码绕过** —— 真正的边界仍在 Main 的 handler 注册与 `event.sender` 校验
+- 遗留:每加工具仍需改 2 个文件,这是 A 方案的固有成本
+
+---
+
+## ADR-008: 通道命名规则与权限裁剪实验(阶段 5)
+
+**状态**:✅ Accepted
+**日期**:2026-10-12
+
+### 背景
+
+阶段 5 实现 ctx 能力注入时,需要把旧的扁平通道名(`tool:select-and-read-file`、`tool:big-base64`、`tool:get-system-info`、`window:hide`)改为按 `tool:{toolId}:{permission}` 三段命名,使通道本身就能表达「哪个工具申请了什么权限」。同时通过 Bug-004 注入实验验证了权限裁剪失效的实际影响。
+
+### 决策
+
+1. **通道命名采用三段式 `tool:{toolId}:{permission}`**:
+   - `tool` = 前缀分组(所有工具相关通道统一前缀)
+   - `{toolId}` = 调用方工具 id(如 `base64`、`system-info`)
+   - `{permission}` = 权限标识(如 `fs:read`、`sys:info`、`window:hide`)
+
+2. **通道名改造映射**:
+   | 旧 | 新 |
+   |---|---|
+   | `tool:select-and-read-file` | `tool:base64:fs:read` |
+   | `tool:big-base64` | `tool:big-base64:fs:read` |
+   | `tool:get-system-info` | `tool:system-info:sys:info` |
+   | `window:hide` | `tool:system-info:window:hide` |
+
+3. **Main 启动时运行 `auditPermissions()` 审计函数**:打印每个工具的权限声明 + 按权限反查工具列表,确认声明与注册一致
+
+4. **Bug-004 实验教训写入 buildContext 注释**:权限裁剪逻辑被注释掉的 Bug 在阶段 5 无安全危害(代码可信可绕过 ctx),但在阶段 7 是致命漏洞
+
+### 理由
+
+1. **三段命名让通道名本身就是权限声明的一部分** —— 不需要查文档就知道 `tool:base64:fs:read` 是 Base64 工具申请的文件读取能力
+2. **未声明权限的工具对应通道不注册** —— `json-formatter` 没声明 `fs:read`,所以 `ipcMain.handle("tool:json-formatter:fs:read")` 根本不存在,调用直接 reject。这是「没建这条路」比「拦住了」更强
+3. **审计函数让权限声明可验证** —— 启动时打印权限映射,不正常一眼看出
+
+### 后果
+
+- 通道名从「功能描述」变成「权限声明的一部分」,可读性提高
+- `auditPermissions()` 在每次启动时打印权限审计表,方便排查不一致
+- Bug-004 的实验教训永久记录在 `context-factory.ts` 注释里,防止未来「简化」裁剪逻辑
+
+---
+
 (后续 ADR 持续追加)

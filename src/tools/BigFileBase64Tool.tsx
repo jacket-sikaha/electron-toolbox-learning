@@ -5,33 +5,36 @@
 //   - 处理过程中界面不卡(Worker 线程编码,主线程不阻塞)
 //   - 有实时进度条(IPC 单向推送)
 //
-// 组件本身的 UI 是 boilerplate,你要重点看的是:
-//   ① 进度订阅的 useEffect 清理函数(防监听泄漏)
-//   ② 进度百分比的计算
+// ────────────────────────────────────────────────────────────────────────
+// 阶段 5 变化(对比重点):
+//
+// 阶段 4 的写法 —— 订阅管理散落在组件里,靠自己记得清理:
+//   useEffect(() => {
+//     const unsubscribe = window.electronAPI.onBase64Progress(setProgress);
+//     return () => unsubscribe();        // ← 忘了这行就泄漏
+//   }, []);
+//   const res = await window.electronAPI.bigBase64();
+//
+// 阶段 5 的写法 —— 订阅生命周期被 ctx 实现收口了:
+//   const res = await ctx.fs!.bigBase64(setProgress);
+//
+// context-factory.ts 里的实现是:
+//   bigBase64: (onProgress) => {
+//     const unsubscribe = api.onBase64Progress(onProgress);
+//     return api.bigBase64().finally(() => unsubscribe());
+//   }
+//
+// 「订阅 → 退订」配对被挪进框架实现,catch/finally 保证无论成功失败都会退订。
+// 组件里只剩业务意图:我要进度,我要结果。
+//
+// ⚠️ 但要看清代价:ctx 收口解决的是「同一组件内订阅-退订配对」,
+//    【不能】解决「组件卸载但请求还在飞」的场景 —— 那种情况需要在 ctx 里
+//    返回 cancel 句柄,或把一次处理做成一等公民的「任务对象」。
+//    这是阶段 7 的题目(长任务模型)。
+// ────────────────────────────────────────────────────────────────────────
 
-import { useEffect, useRef, useState } from "react";
-
-declare global {
-  interface Window {
-    electronAPI: {
-      selectAndReadFile: () => Promise<{
-        buffer: Uint8Array;
-        name: string;
-      } | null>;
-      getSystemInfo: () => Promise<unknown>;
-      hideWindow: () => Promise<void>;
-      bigBase64: () => Promise<{
-        base64: string;
-        name: string;
-        originalSize: number;
-        base64Size: number;
-      } | null>;
-      onBase64Progress: (
-        callback: (data: { processed: number; total: number }) => void
-      ) => () => void;
-    };
-  }
-}
+import { useEffect, useState } from "react";
+import type { Base64Progress, BigBase64Result, ToolProps } from "./types";
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
@@ -40,42 +43,12 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-export function BigFileBase64Tool() {
-  const [progress, setProgress] = useState<{ processed: number; total: number } | null>(null);
-  const [result, setResult] = useState<{
-    base64: string;
-    name: string;
-    originalSize: number;
-    base64Size: number;
-  } | null>(null);
+export function BigFileBase64Tool({ ctx }: ToolProps) {
+  const [progress, setProgress] = useState<Base64Progress | null>(null);
+  const [result, setResult] = useState<BigBase64Result | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
-
-  // ==========================================================================
-  // 关键设计 1:进度订阅 + 清理(防监听泄漏)
-  // --------------------------------------------------------------------------
-  // 这段 useEffect 是阶段 4 最值得看的地方。
-  //
-  // 依赖数组为空 [] → 只在挂载时订阅一次。
-  // 返回的函数是「清理函数」→ 组件卸载时自动执行 unsubscribe()。
-  //
-  // 如果忘了写 return unsubscribe():
-  //   ① 组件挂载 → 注册监听器 A
-  //   ② 用户切到别的工具 → 组件卸载,但监听器 A 还在
-  //   ③ 用户切回来 → 又注册监听器 B
-  //   ④ 现在有两个监听器,一次进度推送触发两次 setProgress
-  //   ⑤ 切换 N 次后,一次推送触发 N 次 —— 性能灾难 + 状态错乱
-  //
-  // 这就是知识地图里的「ipcMain.on 监听泄漏」,阶段 4 的必踩坑。
-  // ==========================================================================
-  useEffect(() => {
-    const unsubscribe = window.electronAPI.onBase64Progress((data) => {
-      setProgress(data);
-    });
-    // ★ 清理函数 —— 这一行是防泄漏的关键
-    return () => unsubscribe();
-  }, []);
 
   // 计时器:处理大文件时显示已耗时,让用户知道还在跑
   useEffect(() => {
@@ -88,10 +61,6 @@ export function BigFileBase64Tool() {
     return () => clearInterval(timer);
   }, [loading]);
 
-  // 记录上次处理结果,供"进度订阅是否泄漏"的演示用
-  const renderCount = useRef(0);
-  renderCount.current += 1;
-
   async function handleProcess() {
     setLoading(true);
     setError(null);
@@ -99,9 +68,9 @@ export function BigFileBase64Tool() {
     setProgress(null);
 
     try {
-      // 关键点:这里是一次 invoke 调用,但进度会通过另一个通道推送过来。
-      // 两者是并行的:invoke 等待最终结果,onBase64Progress 持续接收进度。
-      const res = await window.electronAPI.bigBase64();
+      // 关键点:这里是一次调用,但进度会通过回调持续送进来。
+      // 订阅的创建与销毁都在 ctx.fs.bigBase64 内部完成 —— 见文件头注释。
+      const res = await ctx.fs!.bigBase64((p) => setProgress(p));
       setResult(res);
     } catch (e) {
       setError((e as Error).message);
@@ -224,8 +193,8 @@ export function BigFileBase64Tool() {
       >
         <strong style={{ color: "#4ec9b0" }}>这个工具用到的机制:</strong> Stream 分块读(内存
         O(1) 不爆)+ Worker Threads(CPU 编码不占主线程)+
-        webContents.send(进度单向推送)。处理中试着拖动窗口、切换工具 ——
-        界面不卡就说明 Worker 生效了。
+        ctx 收口的进度订阅(阶段 5:不再由组件自己管订阅/退订)。
+        处理中试着拖动窗口、切换工具 —— 界面不卡就说明 Worker 生效了。
       </div>
     </div>
   );

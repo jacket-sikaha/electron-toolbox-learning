@@ -331,3 +331,41 @@
 - 对照实验方法论:同一份输入、只改一个变量(块大小),让因果链闭合,把「猜测」变成「证据」
 - 防御性断言的价值:每修一个隐蔽 Bug,就加一条能防止它复发的护栏(两层:主线程 + Worker)
 - Worker 的分工:Worker 自己不知道「这是不是最后一块」,必须由主线程通过参数告知 —— 职责清晰(主线程调度、Worker 校验+编码)
+
+---
+
+### Bug-004: 权限裁剪失效导致所有工具获得全部能力
+
+**现象**: 把 `context-factory.ts` 的 `buildContext` 权限裁剪逻辑注释掉,改为无条件注入 `ctx.fs` / `ctx.system` / `ctx.window`,所有工具(包括 permissions 为 `[]` 的 JSON Formatter)都拿到全部能力。但**应用界面完全正常,无任何报错**。
+
+**复现步骤**:
+1. 将 `buildContext` 的三个 `if (permissions.includes(...))` 条件判断注释掉
+2. 改为无条件赋值:`ctx.fs = makeFsApi(); ctx.system = makeSystemApi(); ctx.window = makeWindowApi();`
+3. 运行 `pnpm dev`,切到 JSON Formatter(permissions: `[]`)
+4. 界面正常显示,控制台无报错
+5. 若在 JsonFormatter 代码里写 `await ctx.fs!.selectAndReadFile()` —— 正常代码会 `TypeError: Cannot read properties of undefined`(ctx.fs 不存在),Bug 代码则调用成功
+
+**定位过程**:
+1. 用户切到 JSON Formatter,界面看起来完全正常 → 第一层观察:Bug 不以崩溃形式出现
+2. 用户在 Console 查 `window.electronAPI` → 暴露了 5 个方法(但这是 Preload 的底层 API,不是 ctx)
+3. 教练指出 `window.electronAPI` ≠ `ctx`,重新要求观察 ctx
+4. 用户正确回答:正常 ctx={},Bug 的 ctx={fs,system,window}
+
+**根本原因**: `buildContext` 的裁剪逻辑被绕过,permissions 声明不再决定 ctx 内容。权限模型在 Renderer 侧的「裁剪」这一环节失效。
+
+**修复方案**: 恢复 `buildContext` 的三个条件判断,每个能力只在对应用户声明的 permissions 存在时才注入。
+
+**为什么修复有效**: 裁剪逻辑恢复后,permissions=[] 的工具 ctx={},ctx.fs 是 undefined,即使组件代码误调也会 TypeError 而非静默成功。
+
+**如何避免**:
+1. **权限裁剪逻辑应有单元测试** —— 至少 3 个用例:permissions=[] → ctx={};permissions=["fs:read"] → 只有 ctx.fs;permissions=["sys:info","window:hide"] → 有 ctx.system + ctx.window 但无 ctx.fs
+2. **审计日志可以校验裁剪结果** —— buildContext 返回后可加 dev-only 断言:检查 ctx 的 keys 是否与 permissions 声明一致
+3. **不要把裁剪逻辑写成「能跑就行」** —— 这个 Bug 的危险在于它完全不报错,只在「有人误用不该有的能力」时才暴露
+
+**学习价值**:
+1. **权限裁剪的真正价值取决于「被裁剪方能不能绕过裁剪」** —— 阶段 5(方案 A,代码可信):Renderer 可直接 `import { ipcRenderer }` 绕过 ctx,所以裁剪是「工程纪律」不是「安全防线」;阶段 7(第三方插件):插件拿不到 ipcRenderer,ctx 是唯一能力来源,裁剪失效 = 权限系统彻底失效。同一机制在不同威胁模型下,性质完全不同
+2. **最危险的 Bug 是「静默成功」的 Bug** —— 不崩溃、不报错、界面正常,只是悄悄地给了工具不该有的能力
+3. **window.electronAPI ≠ ctx** —— Preload 暴露的 electronAPI 是底层全量 API(供 ctx 工厂调用),ctx 是 buildContext 按 permissions 裁剪后的能力视图(供工具组件使用)
+4. **「声明与实现一致」是权限系统可信的前提** —— permissions 声明 `[]` 但 ctx 实际有 fs,声明就变成了误导性代码,比没有声明更危险
+5. **Bug 注入实验的价值**:主动制造、主动观察、主动理解 —— 理解一个 Bug 的本质比修 10 个 Bug 更有价值
+6. **对照思考**:正常代码下 `ctx.fs` 是 undefined → 误调 TypeError;Bug 代码下 `ctx.fs` 可用 → 误调成功。**「失败」反而是安全行为,「成功」反而是安全漏洞** —— 颠覆了「能跑就是对的」的直觉

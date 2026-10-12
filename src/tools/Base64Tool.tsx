@@ -9,25 +9,27 @@
 // 不能直接 btoa(btoa 只接受 string)。需要先把 Uint8Array 转 string,
 // 再 btoa。或者用 FileReader.readAsDataURL。
 //
-// 这个组件本身是 UI + 逻辑,boilerplate 你看一眼即可。
-// 重点理解:它调 window.electronAPI.selectAndReadFile() 这个动作背后发生了什么。
+// ────────────────────────────────────────────────────────────────────────
+// 阶段 5 变化(这个文件是理解契约的最佳样本,请对比看):
+//
+//   阶段 4:  const result = await window.electronAPI.selectAndReadFile();
+//   阶段 5:  const result = await ctx.fs!.selectAndReadFile();
+//
+//   两种写法的差别不在「少打几个字」,而在:
+//     ① 工具不再知道「通道名 / 是 invoke 还是 send」这些框架实现细节
+//     ② 工具只能用它声明过的能力 —— 这里 ctx.fs 存在,是因为
+//        shared/tool-manifest.ts 里 base64 声明了 permissions: ["fs:read"]
+//     ③ 框架换实现(改成 REST、改成 WebSocket)工具一行都不用改
+//     ④ 测试时可以传一个假 ctx 进去,不用启动整个 Electron
+//
+//   注:ctx.fs! 里的感叹号 —— ctx 是 Partial<ToolContext>,
+//   类型上 fs 可能不存在。这个工具声明了 fs:read,所以运行时一定存在。
+// ────────────────────────────────────────────────────────────────────────
 
 import { useState } from "react";
+import type { ToolProps } from "./types";
 
-// 全局类型声明:让 TS 知道 window.electronAPI 的类型
-// 这个声明应该放在单独的 types.d.ts,这里先简化放在组件里
-declare global {
-  interface Window {
-    electronAPI: {
-      selectAndReadFile: () => Promise<{
-        buffer: Uint8Array;
-        name: string;
-      } | null>;
-    };
-  }
-}
-
-export function Base64Tool() {
+export function Base64Tool({ ctx }: ToolProps) {
   const [base64, setBase64] = useState("");
   const [fileName, setFileName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -40,13 +42,17 @@ export function Base64Tool() {
     setFileName("");
 
     try {
-      // 这里就是 IPC 调用的入口
-      // 背后链路:window.electronAPI.selectAndReadFile()
-      //   → Preload 的 ipcRenderer.invoke('tool:select-and-read-file')
+      // 这里就是 IPC 调用的入口(但工具自己不知道这一点)
+      // 背后链路:ctx.fs.selectAndReadFile()
+      //   → context-factory.ts 的 makeFsApi() 包了一层
+      //   → preload 的 ipcRenderer.invoke('tool:select-and-read-file')
       //   → IPC 管道跨进程传输
       //   → Main 的 ipcMain.handle 收到,弹 dialog + 读文件
       //   → 返回 { buffer, name }
-      const result = await window.electronAPI.selectAndReadFile();
+      //
+      // ★ 如果这个工具没声明 fs:read,上面这句连类型都过不了、
+      //   运行时 ctx.fs 也是 undefined —— 失败点从「运行时静默」前移到「写代码时」。
+      const result = await ctx.fs!.selectAndReadFile();
 
       if (!result) {
         // 用户取消选择
@@ -123,6 +129,22 @@ export function Base64Tool() {
         >
           {base64 || (loading ? "等待选择文件..." : "点击「选择文件」开始")}
         </pre>
+      </div>
+
+      {/* 教学提示:把「声明 → 能力」这条链显式画出来 */}
+      <div
+        style={{
+          padding: "10px 16px",
+          borderTop: "1px solid #3c3c3c",
+          fontSize: "11px",
+          color: "#858585",
+          lineHeight: "1.7",
+        }}
+      >
+        <strong style={{ color: "#4ec9b0" }}>权限链:</strong> manifest 里声明{" "}
+        <code>permissions: ["fs:read"]</code> → 框架调用 buildContext 组装出{" "}
+        <code>ctx.fs</code> → 本组件调 <code>ctx.fs.selectAndReadFile()</code>。
+        全程没有出现过 ipcRenderer。
       </div>
     </div>
   );

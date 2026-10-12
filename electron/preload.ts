@@ -59,22 +59,21 @@ export interface Base64Progress {
 }
 
 contextBridge.exposeInMainWorld("electronAPI", {
-  // 阶段 2:Base64 工具用的 API
-  // 调用 ipcRenderer.invoke,channel 名必须与 main.ts 里 ipcMain.handle 一致
+  // 阶段 5:通道名改为 tool:{toolId}:{permission} 格式
+  // 「标识来自通道本身」—— 没声明权限的工具,连对应的通道都不存在。
+  // Base64Tool 声明了 fs:read → 通道 tool:base64:fs:read 存在
+  // JsonFormatter 没声明 fs:read → 通道 tool:json-formatter:fs:read 根本不注册
   selectAndReadFile: (): Promise<FileContent | null> =>
-    ipcRenderer.invoke("tool:select-and-read-file"),
+    ipcRenderer.invoke("tool:base64:fs:read"),
 
-  // 阶段 3:系统信息 —— 只读、零入参、零风险
   getSystemInfo: (): Promise<SystemInfo> =>
-    ipcRenderer.invoke("tool:get-system-info"),
+    ipcRenderer.invoke("tool:system-info:sys:info"),
 
-  // 阶段 3:隐藏当前窗口(托盘应用:最小化到托盘)
-  // 零入参 —— Renderer 只能说「隐藏我这个窗口」,不能指定隐藏别的窗口
-  hideWindow: (): Promise<void> => ipcRenderer.invoke("window:hide"),
+  hideWindow: (): Promise<void> =>
+    ipcRenderer.invoke("tool:system-info:window:hide"),
 
-  // 阶段 4:大文件 Base64(Stream + Worker)
   bigBase64: (): Promise<BigBase64Result | null> =>
-    ipcRenderer.invoke("tool:big-base64"),
+    ipcRenderer.invoke("tool:big-base64:fs:read"),
 
   // 阶段 4:订阅进度推送 —— IPC 的第二种模式(单向推送)
   //

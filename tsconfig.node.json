@@ -9,5 +9,5 @@
     "sourceMap": true,
     "strict": true
   },
-  "include": ["electron/**/*.ts", "vite.config.ts"]
+  "include": ["electron/**/*.ts", "shared/**/*.ts", "vite.config.ts"]
 }

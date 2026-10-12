@@ -144,7 +144,6 @@ Base64 工具需要读本地文件,Renderer 在安全配置下没有 `fs` / `dia
 ---
 
 ## ADR-003:阶段 4 大文件处理架构(Stream + Worker Threads)
-
 **日期**:2026-10-08
 
 ### 决策
@@ -396,18 +395,185 @@ Renderer ──invoke──▶ Main 主线程 ──dialog 选文件──▶ cr
 
 ---
 
+## ADR-006:阶段 5 插件化扩展架构
+
+**日期**:2026-10-08
+
+### 背景
+
+阶段 4 结束时,项目有 4 个工具但 [src/App.tsx](../src/App.tsx) 仍是 if/else 硬编码 —— **每加一个工具要改两处**(侧边栏按钮 + 渲染分支),Main 端每加一个需 Node 能力的工具也要多注册一个 handler。加第 5 个工具改 2 处,加第 50 个还是改 2 处,而 App.tsx 会涨到 300 行。
+
+同时 [electron/preload.ts](../electron/preload.ts) 把**所有**能力一次性 `exposeInMainWorld` —— 包括 JSON Formatter 这种完全不需要 Node 能力的工具,也能调到 `bigBase64()`。**这违反了最小权限原则。**
+
+**阶段目标**:把「工具」变成可插拔模块,并建立**真正可执行的权限模型**。
+
+### 决策
+
+**1. 采用「编译时注册」(方案 A),不做运行时加载**
+
+工具是项目源码里的模块,通过一个 import 数组注册。**不**实现「扫描本地目录 + 动态 import 加载」。
+
+**2. 注册表采用「单一数据源 + 声明与实现分离」**
+
+```ts
+// shared/tool-manifest.ts —— 纯数据,Main 与 Renderer 都能安全 import
+export const TOOL_MANIFEST = [
+  { id: "json-formatter", name: "JSON Formatter", icon: "{}", order: 1, permissions: [] },
+  { id: "base64",         name: "Base64 工具",    icon: "🔢", order: 2, permissions: ["fs:read"] },
+  { id: "big-base64",     name: "大文件 Base64",  icon: "📦", order: 3, permissions: ["fs:read"] },
+  { id: "system-info",    name: "系统信息",       icon: "🖥️", order: 4, permissions: ["sys:info", "window:hide"] },
+] as const;
+```
+
+```ts
+// src/tools/index.ts —— 只在 Renderer,负责「id → 组件」映射
+export const TOOL_COMPONENTS: Record<string, React.ComponentType> = { ... }
+```
+
+**关键约束:共享文件里绝不能出现 React 组件。**
+
+**3. `ctx`(能力上下文)在 Renderer 组装,Main 只负责「实现能力 + 校验」**
+
+```ts
+// Renderer:按当前工具的 permissions 裁剪出 ctx
+// JsonFormatter(permissions: []) → ctx = {}            ← 什么都没有
+// Base64Tool(permissions: ["fs:read"]) → ctx = { fs: {...} }
+```
+
+**4. 权限校验的三层模型**
+
+| 层 | 机制 | 防什么 |
+|---|---|---|
+| ① 通道存在性 | 没声明权限的工具,对应 IPC 通道**根本不注册** | 越权调用(物理上不存在) |
+| ② 来源校验 | `event.sender`(Electron 运行时注入,调用方改不了) | 伪造身份的调用 |
+| ③ 入参校验 | 路径/大小/格式校验 | 合法来源传来的恶意数据 |
+
+### 为什么这样设计
+
+1. **单一数据源避免「两端不同步」** —— 若 Main 和 Renderer 各存一份完整清单,会出现「UI 显示有权限、Main 校验说没权限」这类极难排查的 Bug。共享纯数据文件让 TypeScript 在**编译期**保证两端一致。
+
+2. **声明与实现分离是分期演进的接口位** —— 共享的只有元数据(`meta` + `permissions`),组件映射留在 Renderer。这个结构在阶段 7 做懒加载时,正好是插入 `React.lazy()` 的位置;在做运行时加载(B 方案)时,正好是「加载器」要替换的位置。**契约不变,只是数据来源变。**
+
+3. **`ctx` 必须在 Renderer 组装,是技术约束不是选择** —— IPC 只能传数据(结构化克隆),**传不了函数**。`ctx.fs.selectAndReadFile` 这个对象必须存在于使用它的内存里。Main 就算组装好也传不过去。
+
+4. **权限校验的依据不能来自调用方** —— 若用入参 `{ toolId: "base64" }` 做校验,攻击者填 `toolId: "system-info"` 即可冒充。**身份必须来自框架注入(`event.sender`)或物理上不存在(未注册的通道)。**
+
+5. **`permissions` 在 A 阶段也立即有价值** —— 虽然编译时注册下所有代码可信、拦不住人,但它是**可被程序查询的元数据**:改通用机制时能一行 `filter()` 算出影响面;审计/文档/商店上架要求时能一眼看全能力清单。**「可查询 = 可自动化」,这是声明式优于命令式的根本原因。**
+
+### 替代方案(已否决)
+
+| 方案 | 否决理由 |
+|---|---|
+| 运行时扫描目录 + 动态 `import()`(方案 B) | 架构契约与 A **完全相同**,只多了「加载器」(readdir + 动态 import + 错误处理 + 路径安全校验)约 100 行。**没有权限模型的运行时加载 = 纯粹的安全漏洞** —— 应在理解权限模型之后再补 |
+| Main 存清单,Renderer 通过 IPC 拉取(方案 β) | 能跑,但 Renderer 首屏要等一个 IPC 往返 → **首屏空白 + 需处理失败态**;且失去编译期类型校验 |
+| Renderer 存清单,Main 启动时向 Renderer 要(方案 α) | **循环依赖**:Main 要先有窗口才能问 Renderer,而窗口是 Main 创建的。且权威性反了 —— 让保安向陌生人要监控录像 |
+| 两边各存一份完整清单 | 两端会不同步(改一边忘另一边 / 字段内容不一致)→ 极难排查 |
+| 继续用 `window.electronAPI` 扁平对象 | **违反最小权限**:不需要 Node 能力的工具也能调到全部能力。「按功能命名 + 一次性全暴露」无法做到按工具裁剪 |
+| 在 Main 组装 ctx 传给 Renderer | **技术上不可能** —— 函数不可跨 IPC 序列化 |
+| 用入参 `toolId` 做权限校验 | 调用方自己填的身份信息,可任意伪造,等于没校验 |
+
+### 后果
+
+**正面:**
+- 加一个工具只需**改 1 个文件、加 1 个配置项**(`TOOL_MANIFEST` + 组件映射),侧边栏自动出现
+- 权限从「隐式散落在实现里」变成「集中显式声明」,可查询、可审计
+- 权限模型的三层防御为未来「运行时加载第三方插件」打好了地基
+
+**代价与遗留问题:**
+- 共享文件里新增了 `as const` 的元数据数组,**每加工具仍需改两个文件**(manifest + components),这是 A 方案的固有成本
+- **`permissions` 在 A 阶段只是「声明」,不是「强制」** —— 编译时注册下所有代码可信,工具可直接 `import("node:fs")` 绕过。**真正的强制要在 B 阶段才成立**
+- `ctx` 的裁剪逻辑在 Renderer 执行,**理论上可被 Renderer 内部代码绕过** —— 真正的边界仍然在 Main 的 handler 注册与 `event.sender` 校验
+
+### 规模扩大 10 倍
+
+- 工具增至 50 个:侧边栏需要分组/搜索;`TOOL_MANIFEST` 需要拆分为多文件按类目组织;组件映射必须做懒加载(50 个 React 组件全量 import 会拖慢启动)
+- 若开放第三方插件:必须从 A 迁移到 B(运行时加载)+ 沙箱隔离 + 权限弹窗授权 + 签名校验,`permissions` 从「声明」升级为「运行时强制」
+- Main 端 handler 需要按能力重组命名空间(`ctx:fs:*` / `ctx:sys:*`),并引入统一的校验中间件而非逐个 handler 手写
+- 需要考虑工具间通信(事件总线 / 共享状态)→ 对应架构演进路线的 V4
+
+---
+
 ## 架构演进路线
 
 | 版本 | 架构 | 触发条件 |
 |------|------|---------|
 | V0 | 单窗口 + 单工具 if/else 渲染 | 阶段 1 最小实现 |
-| V1(当前) | 工具注册表 + 路由切换 | 工具数 ≥ 3 |
-| V2 | 分层 Preload + 类型安全 IPC | IPC handler ≥ 5 |
-| V3 | 插件化(动态加载工具) | 工具数 ≥ 10 或第三方扩展 |
+| V1 | 4 工具 + if/else 渲染(实际停留在 V0 形态) | — |
+| V2(当前) | **工具契约 + 注册表 + 路由切换 + 能力注入** | 工具数 ≥ 3(阶段 5) |
+| V3 | 插件化(运行时动态加载工具)+ 权限强制 | 工具数 ≥ 10 或需第三方扩展 |
 | V4 | 跨模块通信 + 事件总线 | 工具间需协作 |
 | V5 | 共享渲染进程 / 工具进程 | 内存压力大或后台任务多 |
 
 **对应实际进度**:
 - V0:阶段 1(JSON Formatter 单工具)
-- V1:阶段 2-4(工具增至 4 个:JSON / Base64 / 系统信息 / 大文件 Base64),但 App.tsx 仍是 if/else,「注册表」尚未实现 —— **工具数已达阶段 5 的触发线**
+- V1:阶段 2-4(工具增至 4 个,但 App.tsx 仍是 if/else,「注册表」尚未实现)
+- **V2:阶段 5(本次)—— 工具契约 `ToolModule` + 单一数据源注册表 + 能力注入 + Main 三层权限校验**
 - 阶段 4 已提前引入「后台线程」概念(Worker),对应 V5 的一部分
+
+---
+
+## 复盘:阶段 5 插件化扩展架构
+
+### 核心机制
+
+| 机制 | 要点 |
+|---|---|
+| 工具契约(双向合同) | `ToolManifestEntry{meta, permissions}` 声明「工具需要什么」+ `ToolContext` 注入「框架提供什么」。两者缺一不可,单向声明 = 权限系统废纸 |
+| 单一数据源 | `shared/tool-manifest.ts` 是纯数据,Main 和 Renderer 各自 import。编译期类型校验保证两端一致,不靠运行时同步 |
+| 声明与实现分离 | `TOOL_MANIFEST`(纯数据,共享)与 `TOOL_COMPONENTS`(React 组件,仅 Renderer)分离。共享文件里绝不能出现 React 组件(Main import 会崩) |
+| ctx 裁剪 | `buildContext(permissions)` 按 permissions 决定注入哪些能力。permissions=[] → ctx={} ;permissions=["fs:read"] → ctx={fs:{...}} |
+| Main 三层权限校验 | ① 通道存在性(未声明权限的工具对应 handler 不注册)② 来源校验(`event.sender` 运行时注入)③ 入参校验(路径/大小/格式纵深防御) |
+| 通道命名规则 | `tool:{toolId}:{permission}` 三段式。每段含义:tool=前缀分组 / toolId=调用方 / permission=权限标识(能力类别,不是 API 名) |
+| 审计函数 | `auditPermissions()` 在 Main 启动时打印每个工具的权限声明 + 反查(某权限被哪些工具使用)。`auditRegistry()` 在 Renderer 模块加载时检查清单 id 与组件映射一致性 |
+
+### 为什么这样设计
+
+1. **插件契约是双向合同** —— 只声明「工具需要什么」(单向)的插件系统,工具会绕过框架直接调底层 API,权限系统变成废纸。必须同时定义「框架向工具注入什么」(ctx),permissions 才能真正决定「注入什么」
+2. **单一数据源避免不同步** —— 两份清单会出现「UI 显示有权限、Main 校验说没权限」这类极难排查的 Bug。共享纯数据文件让 TypeScript 编译期保证一致
+3. **ctx 必须在 Renderer 组装** —— IPC 传数据(结构化克隆)传不了函数。ctx.fs.selectAndReadFile 这个对象必须存在于使用它的内存里。这不是选择,是技术约束
+4. **权限标识来自框架不来自入参** —— 入参里的 toolId 可任意伪造;通道本身的存在性(未注册=不存在)和 `event.sender`(运行时注入)才是可信身份来源
+5. **permissions 在 A 阶段也立即有价值** —— 把散落在实现里的隐式事实变成集中的显式声明,可查询=可自动化。改通用机制时一行 filter() 拿到影响面,不用翻源码考古
+
+### AI 可写哪些(boilerplate)
+
+- 契约类型定义(interface/type 声明)
+- 工厂函数实现(makeFsApi/makeSystemApi/makeWindowApi)
+- App.tsx 注册表驱动渲染(TOOL_MANIFEST.map + TOOL_COMPONENTS[id])
+- auditPermissions/auditRegistry 审计函数
+- tsconfig include 路径调整
+
+### 必须掌握哪些(架构判断)
+
+- **插件契约为什么是双向的** —— 单向声明的权限系统必然被绕过
+- **meta 和 component 为什么必须分开** —— 消费者与加载时机不同,混在一起会导致启动时全量加载
+- **ctx 为什么必须在 Renderer 组装** —— IPC 传不了函数,对象必须在使用者内存里
+- **权限标识为什么不能来自入参** —— 被校验方提供的身份信息不可信
+- **permissions 为什么在 A 阶段也值得写** —— 隐式→显式、可查询=可自动化、成本差判据
+- **权限裁剪的真正价值取决于能否绕过** —— 阶段 5 是工程纪律,阶段 7 才是安全防线
+
+### 3 个易错 Bug
+
+1. **权限裁剪失效(Bug-004 实战)** —— 把 buildContext 的条件判断注释掉改为无条件注入。**界面不崩溃不报错**,只是悄悄给了所有工具全部能力。最危险的 Bug 是「静默成功」的 Bug
+2. **共享文件里放 React 组件** —— `shared/tool-manifest.ts` 里 `import { JsonFormatter }` 会导致 Main bundle 拉入 React + 浏览器 API,Node 环境直接报错。共享的只有元数据
+3. **ctx 组装放 Main** —— 混淆「谁拥有能力」(Main 实现 dialog/fs)和「谁持有对象」(ctx 必须在 Renderer 内存里)。IPC 传不了函数
+
+### 1 个性能风险
+
+- **全量 import 组件** —— `TOOL_COMPONENTS` 把 4 个 React 组件全量 import。工具增至 50 个时,启动会拖慢。阶段 7 在 `TOOL_COMPONENTS` 映射处插入 `React.lazy()` 做按需加载
+
+### 1 个安全风险
+
+- **Renderer 理论上可绕过 ctx 直调 window.electronAPI** —— contextIsolation 阻止了 Renderer 拿到 ipcRenderer,但 Preload 暴露的 electronAPI 仍是全量的。阶段 5 的 ctx 裁剪是「工程纪律」不是「安全防线」;阶段 7 第三方插件拿不到 electronAPI 时,ctx 才是真正的安全边界
+
+### 1 个面试题
+
+> 「Electron 应用里,如何让第三方插件只能调用它声明过的系统能力?」
+>
+> 答题要点:① 插件契约双向合同(声明 permissions + 框架注入 ctx)② ctx 按 permissions 裁剪,未声明的能力不注入 ③ Main 侧三层校验:通道不注册 + event.sender 来源校验 + 入参纵深防御 ④ 身份标识来自框架注入不来自入参 ⑤ contextIsolation 阻止插件拿到 ipcRenderer,ctx 是唯一能力来源 ⑥ 阶段 5(编译时注册)只是声明,阶段 7(运行时加载)才真正强制
+
+### 规模扩大 10 倍
+
+- 工具 50 个:`TOOL_MANIFEST` 拆分为多文件按类目组织;`TOOL_COMPONENTS` 全量 import 拖慢启动 → `React.lazy()` 按需加载;侧边栏需分组/搜索
+- 开放第三方插件:A→B 迁移(运行时加载)+ 沙箱隔离 + 权限弹窗授权 + 签名校验;permissions 从「声明」升级为「运行时强制」
+- Main handler 按能力重组命名空间(`ctx:fs:*` / `ctx:sys:*`),引入统一校验中间件而非逐个手写
+- 跨模块通信 → 事件总线(V4 架构演进)

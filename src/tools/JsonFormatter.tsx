@@ -6,12 +6,22 @@
 //   3. 不需要系统 API
 // 如果一个功能不需要 Node,就放 Renderer —— 最小权限原则。
 //
+// ────────────────────────────────────────────────────────────────────────
+// 阶段 5 变化:它现在收到 ToolProps,但 permissions 是 [] → ctx = {}
+//
+// 这不是「忘了给它能力」,而是最小权限原则的正面体现:
+//   阶段 4 它虽然不用 Node,却仍然能调到 window.electronAPI.bigBase64();
+//   阶段 5 它连 ctx.fs 这个属性都访问不到 —— 因为框架根本没创建它。
+//
 // 这个组件本身只是 boilerplate,你不需要重点看。
-// 重点看的是「它放在 src/tools/ 下、跑在 Renderer 进程」这个架构决策。
+// 重点看的是「它放在 src/tools/ 下、跑在 Renderer 进程、拿到的 ctx 是空对象」
+// 这几个架构事实。
+// ────────────────────────────────────────────────────────────────────────
 
 import { useState, useMemo } from "react";
+import type { ToolProps } from "./types";
 
-export function JsonFormatter() {
+export function JsonFormatter(_props: ToolProps) {
   const [input, setInput] = useState("");
   const [indent, setIndent] = useState(2);
 
@@ -40,6 +50,13 @@ export function JsonFormatter() {
           </select>
         </label>
       </header>
+
+      {error && (
+        <div className="error" style={{ padding: "8px 16px" }}>
+          ⚠ {error}
+        </div>
+      )}
+
       <div className="tool-body">
         <textarea
           className="input-area"
@@ -47,9 +64,7 @@ export function JsonFormatter() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
         />
-        <pre className="output-area">
-          {error ? <span className="error">⚠ {error}</span> : output}
-        </pre>
+        <pre className="output-area">{output}</pre>
       </div>
     </div>
   );

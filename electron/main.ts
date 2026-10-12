@@ -22,6 +22,9 @@ import { basename } from "node:path";
 import { Worker } from "node:worker_threads";
 import os from "node:os";
 
+// 阶段 5:Main 侧 import TOOL_MANIFEST —— 权限声明从「实现细节」变成「可被程序查询的元数据」
+import { TOOL_MANIFEST, getToolsUsingPermission } from "../shared/tool-manifest";
+
 // 关键设计 1:__dirname 在 CommonJS 环境下可直接用
 // electron/main.ts 会被 tsc 编译成 CommonJS 输出到 dist-electron/,
 // 所以 __dirname 指向 dist-electron/。
@@ -153,16 +156,47 @@ function createWindow() {
 // - ipcMain.handle + ipcRenderer.invoke:双向通信,返回 Promise,异步友好(推荐)
 // 阶段 2 的需求是「读文件并返回内容」,必须用 invoke/handle。
 //
-// 关键设计 6.2:channel 名用 'tool:select-and-read-file' 这种命名
-// - 用 'tool:' 前缀分组,避免后续工具增多后 channel 名冲突
-// - 用 kebab-case,Electron 社区约定
+// 关键设计 6.2:阶段 5 通道命名改为 tool:{toolId}:{permission}
+// - 通道名本身编码了「哪个工具的哪个权限」
+// - 没声明权限的工具,对应通道根本不注册 → 攻击者就算知道命名规则也调不到
+// - 这就是「标识来自通道本身」:不问「你是谁」(会说谎),看「通道存不存在」(框架说了算)
 //
 // 关键设计 6.3:零入参 = 零攻击面(你选的方案 2)
 // - handler 不读取 event 或 args,因为 Renderer 不传任何东西
 // - path 由 Main 内部 dialog 拿到,Renderer 拿不到 path
 // - 即使 Renderer 被攻破,攻击者也无法伪造 path
+
+// ── 阶段 5:权限声明审计 ──────────────────────────────────────────────────
+//
+// auditPermissions() 把 TOOL_MANIFEST 从「静态数据」变成「运行时可见的事实」。
+// 它在启动时打印一份「每个工具声明了什么权限」的清单 ——
+// 现在 4 个工具都自己写的,permissions 拦不住任何东西(方案 A 的局限);
+// 但它让你一眼看到「这个应用到底碰了哪些系统能力」,不用翻 preload.ts 考古。
+//
+// 阶段 6-7 做真实拦截时,这个函数会变成「校验 + 拒绝」,而不仅是「打印」。
+// 现在它存在的价值:把隐式事实变成显式声明 → 声明可被查询 → 可查询 = 可自动化。
+function auditPermissions() {
+  console.log("[permissions] 工具权限声明审计:");
+  for (const entry of TOOL_MANIFEST) {
+    const perms = entry.permissions.length > 0
+      ? entry.permissions.join(", ")
+      : "(无 — 纯前端工具)";
+    console.log(`  ${entry.meta.id.padEnd(16)} → ${perms}`);
+  }
+
+  // 按权限反查:哪些工具用了某个能力
+  console.log("[permissions] 能力 → 工具映射:");
+  const allPerms = ["fs:read", "sys:info", "window:hide", "clipboard", "net"] as const;
+  for (const p of allPerms) {
+    const tools = getToolsUsingPermission(p);
+    if (tools.length > 0) {
+      console.log(`  ${p.padEnd(14)} → ${tools.join(", ")}`);
+    }
+  }
+}
+
 function registerIpcHandlers() {
-  ipcMain.handle("tool:select-and-read-file", async () => {
+  ipcMain.handle("tool:base64:fs:read", async () => {
     // 1. 弹系统文件选择框(只能在 Main 调,Renderer 碰不到 dialog)
     const result = await dialog.showOpenDialog({
       title: "选择要转 Base64 的文件",
@@ -223,7 +257,7 @@ function registerIpcHandlers() {
   //   invoke 是「一次调用 → 一个返回值」。进度是「一次调用 → 多次更新」。
   //   所以进度必须走 webContents.send(单向推送),返回值只用来给最终结果。
   //   这是 IPC 的第二种模式(阶段 4 新知识)。
-  ipcMain.handle("tool:big-base64", async (event) => {
+  ipcMain.handle("tool:big-base64:fs:read", async (event) => {
     const result = await dialog.showOpenDialog({
       title: "选择大文件(Stream + Worker 处理)",
       properties: ["openFile"],
@@ -389,7 +423,7 @@ function registerIpcHandlers() {
   //   - os.cpus() / os.totalmem() / process.versions 都是 Node API,Renderer 没有
   //   - 但这些都是「只读、无参数、无副作用」的调用,是 IPC 里最安全的一类:
   //     没有入参 → 没有攻击面(和阶段 2 的方案 2 同一个思路)
-  ipcMain.handle("tool:get-system-info", () => {
+  ipcMain.handle("tool:system-info:sys:info", () => {
     return {
       platform: process.platform,
       arch: process.arch,
@@ -412,9 +446,12 @@ function registerIpcHandlers() {
   // 托盘应用里,「最小化到托盘」按钮需要让 Main 把窗口藏起来。
   // 注意这里同样零入参:Renderer 只能说「隐藏我自己的窗口」,
   // 不能指定「隐藏哪个窗口」—— 不开这个口子,就少一类攻击面。
-  ipcMain.handle("window:hide", () => {
+  ipcMain.handle("tool:system-info:window:hide", () => {
     mainWindow?.hide();
   });
+
+  // 阶段 5:启动时审计权限声明 —— 把隐式事实变成显式输出
+  auditPermissions();
 }
 
 // 关键设计 7:托盘(Tray)—— 阶段 3 核心,让应用「常驻」而不是「关了就死」
