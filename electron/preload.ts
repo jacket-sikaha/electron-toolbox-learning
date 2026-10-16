@@ -1,7 +1,9 @@
-// electron/preload.ts —— Preload 桥
+// electron/preload.ts — Preload 桥
 //
 // 阶段 2:暴露 selectAndReadFile API(文件读取)
 // 阶段 3:暴露 getSystemInfo / hideWindow API(系统信息 + 托盘集成)
+// 阶段 4:暴露 bigBase64 / onBase64Progress API(大文件 + 进度推送)
+// 阶段 6-3:暴露 log API(转发给 Main 落盘)+ debug 通道
 //
 // 关键设计 1:contextBridge.exposeInMainWorld 是「唯一正确」的暴露方式
 // - 它把对象复制到 Renderer 的 window 上,Renderer 只能调这些方法
@@ -58,7 +60,51 @@ export interface Base64Progress {
   total: number;
 }
 
+// ── 阶段 6-3:日志转发(替代在 preload 里直接 import electron-log)──────────
+//
+// 为什么绕这一圈?见文件头 Bug-006:sandboxed preload 不能引入 electron-log
+// (它要 require path/fs/child_process,白名单里没有)。
+// 所以 Renderer 侧只能把日志「寄」给 Main,由 Main 写文件。
+//
+// 为什么用 send 而不是 invoke?
+//   日志是「发出去就不用管」的单向通知,不需要返回值。
+//   send/on 语义更贴切,也不会在 Main 卡顿时让 Renderer 攒一堆待决 Promise。
+
+type LogLevel = "info" | "warn" | "error" | "debug";
+
+function formatLogArg(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v instanceof Error) return `${v.name}: ${v.message}\n${v.stack ?? ""}`;
+  try {
+    // JSON.stringify(undefined) 返回 undefined(不是字符串),要兜底
+    return JSON.stringify(v) ?? String(v);
+  } catch {
+    // 循环引用等无法序列化的情况
+    return String(v);
+  }
+}
+
+function forwardLog(level: LogLevel, args: unknown[]): void {
+  // IPC 参数必须可结构化克隆,所以先拍平成字符串
+  ipcRenderer.send("log:write", {
+    level,
+    message: args.map(formatLogArg).join(" "),
+  });
+}
+
 contextBridge.exposeInMainWorld("electronAPI", {
+  // 阶段 6-3:debug 通道(临时,阶段 6 结束后删除)
+  debugCrash: (): Promise<void> => ipcRenderer.invoke("debug:crash"),
+  debugUncaught: (): Promise<void> => ipcRenderer.invoke("debug:uncaught"),
+
+  // 阶段 6-3:日志 API —— 转发给 Main 写文件(见文件头 Bug-006)
+  log: {
+    info: (...args: unknown[]) => forwardLog("info", args),
+    warn: (...args: unknown[]) => forwardLog("warn", args),
+    error: (...args: unknown[]) => forwardLog("error", args),
+    debug: (...args: unknown[]) => forwardLog("debug", args),
+  },
+
   // 阶段 5:通道名改为 tool:{toolId}:{permission} 格式
   // 「标识来自通道本身」—— 没声明权限的工具,连对应的通道都不存在。
   // Base64Tool 声明了 fs:read → 通道 tool:base64:fs:read 存在
@@ -89,7 +135,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   //   const unsubscribe = window.electronAPI.onBase64Progress(cb);
   //   组件卸载时:unsubscribe();
   onBase64Progress: (
-    callback: (data: Base64Progress) => void
+    callback: (data: Base64Progress) => void,
   ): (() => void) => {
     // 注意:必须包一层 wrapper,不能直接把 callback 交给 ipcRenderer.on。
     // 因为 ipcRenderer 的监听器签名是 (event, ...args),直接传 callback 会

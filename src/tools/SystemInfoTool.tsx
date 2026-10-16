@@ -16,6 +16,7 @@
 
 import { useEffect, useState } from "react";
 import type { SystemInfo, ToolProps } from "./types";
+import { rendererLog } from "./renderer-log";
 
 // 把字节数格式化成人类可读的 GB / MB
 function formatBytes(bytes: number): string {
@@ -52,6 +53,7 @@ export function SystemInfoTool({ ctx }: ToolProps) {
       const data = await ctx.system!.getInfo();
       setInfo(data);
     } catch (e) {
+      rendererLog.error("SystemInfoTool: 获取系统信息失败", e);
       setError((e as Error).message);
     } finally {
       setLoading(false);
@@ -216,6 +218,63 @@ export function SystemInfoTool({ ctx }: ToolProps) {
         {!info && !loading && !error && (
           <div style={{ color: "#858585" }}>暂无数据,点击「刷新」重试</div>
         )}
+      </div>
+
+      {/* 阶段 6-3:crashReporter 调试面板(临时,阶段 6 结束后删除) */}
+      <div
+        style={{
+          padding: "12px 16px",
+          borderTop: "1px solid #3c3c3c",
+          fontSize: "11px",
+          color: "#858585",
+          lineHeight: "1.7",
+        }}
+      >
+        <strong style={{ color: "#f48771" }}>⚠ 调试:crashReporter 测试</strong>
+        <br />
+        <span>这两个按钮触发主进程崩溃/未捕获异常,验证 crashReporter 是否正常工作。</span>
+        <br />
+        <span>崩溃后应用会退出 —— 重启后查看日志文件确认崩溃报告已记录。</span>
+        <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+          <button
+            onClick={() => {
+              const api = (window as unknown as {
+                electronAPI?: { debugCrash?: () => Promise<void> };
+              }).electronAPI;
+              void api?.debugCrash?.();
+            }}
+            style={{
+              padding: "4px 12px",
+              fontSize: "11px",
+              border: "1px solid #f48771",
+              color: "#f48771",
+              background: "transparent",
+              borderRadius: "3px",
+              cursor: "pointer",
+            }}
+          >
+            触发 crash
+          </button>
+          <button
+            onClick={() => {
+              const api = (window as unknown as {
+                electronAPI?: { debugUncaught?: () => Promise<void> };
+              }).electronAPI;
+              void api?.debugUncaught?.();
+            }}
+            style={{
+              padding: "4px 12px",
+              fontSize: "11px",
+              border: "1px solid #f48771",
+              color: "#f48771",
+              background: "transparent",
+              borderRadius: "3px",
+              cursor: "pointer",
+            }}
+          >
+            触发 uncaught
+          </button>
+        </div>
       </div>
     </div>
   );

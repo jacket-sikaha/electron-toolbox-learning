@@ -42,11 +42,12 @@
 - [ ] 环境变量泄漏
 
 ### 生产环境
-- [ ] 路径错误(__dirname / resourcesPath)
+- [x] **路径错误(Bug-007:崩溃目录手写拼接;Bug-008:假设 userData 一定可写)**
 - [ ] 环境变量错误
 - [ ] 构建后资源不存在
-- [ ] 打包后行为不同
+- [x] **打包后行为不同(Bug-005:dev 的启动参数在 prod 丢失;Bug-006:preload 依赖图进包)**
 - [ ] 更新失败
+- [x] **第三方库静默失败(Bug-008:electron-log 写盘 EPERM 被完全吞掉)**
 
 ---
 
@@ -369,3 +370,461 @@
 4. **「声明与实现一致」是权限系统可信的前提** —— permissions 声明 `[]` 但 ctx 实际有 fs,声明就变成了误导性代码,比没有声明更危险
 5. **Bug 注入实验的价值**:主动制造、主动观察、主动理解 —— 理解一个 Bug 的本质比修 10 个 Bug 更有价值
 6. **对照思考**:正常代码下 `ctx.fs` 是 undefined → 误调 TypeError;Bug 代码下 `ctx.fs` 可用 → 误调成功。**「失败」反而是安全行为,「成功」反而是安全漏洞** —— 颠覆了「能跑就是对的」的直觉
+
+---
+
+### Bug-005: dev 的启动参数在打包后丢失导致 prod 直接崩溃
+
+**日期**:2026-10-12
+**类型**:生产环境 / 打包后行为不同(启动参数丢失)
+
+**现象**:
+> dev 模式(`pnpm dev`)一切正常。
+> 打包后双击 `release/win-unpacked/ElectronToolbox.exe`:
+> - 窗口完全不出现
+> - 没有任何 JS 报错、没有弹窗、没有日志
+> - 只有进程退出码 `1`
+>
+> 这是最难受的一类 Bug:**dev 好、prod 死,而且死得悄无声息**。
+
+**复现步骤**:
+1. `pnpm dev` → 应用正常启动 ✅
+2. `pnpm build:win` 打包 → 双击产物 exe → 立即退出,exit code 1 ❌
+3. 对照:`pnpm dev:electron`(脚本里手写了 `--no-sandbox --disable-gpu-sandbox`)→ 正常 ✅
+
+**定位过程**:
+- **第一步**:现象是「exit code 1,无任何输出」→ 先排除 JS 层异常(GlobalExceptionHandler 没触发)
+- **第二步**:对照 dev 与 prod 的**启动路径**差异 ——
+  dev 走 `vite-plugin-electron` 的 `startup(ELECTRON_ARGS)`,
+  prod 走「用户双击 exe,由操作系统直接拉起,零命令行参数」
+- **第三步(关键)**:回到 `vite.config.ts` 看到:
+  ```ts
+  const ELECTRON_ARGS = [".", "--no-sandbox", "--disable-gpu-sandbox"];
+  ```
+  → 这两个参数**只存在于 dev 的启动调用里**。它是「谁启动进程」决定的,
+  而 prod 的启动者(Windows Shell)根本不知道有这个需求。
+
+**根本原因**:
+> 项目为了绕开 Windows 11 25H2 上 Chromium sandbox 初始化 Bug(electron#52098),
+> 需要在启动时带 `--no-sandbox` / `--disable-gpu-sandbox`。
+> dev 模式下这两个参数由 `vite-plugin-electron` 作为**命令行参数**传入 —— 能生效。
+>
+> 但打包后,exe 由用户双击启动,**没有任何人负责传这两个参数**。
+> 缺失参数 → Chromium sandbox 初始化失败 → 进程在 C++ 层直接死掉 →
+> JS 还没开始跑,所以**没有任何 JS 层面的错误输出**。
+>
+> 一句话:**把「必须在启动前生效的配置」寄托在「启动者会传参」上,是脆弱的。**
+
+**修复方案**:
+把 workaround 从「启动参数」搬进「代码」—— 在 `app.whenReady()` **之前**注入:
+```ts
+// electron/main.ts 顶部
+app.commandLine.appendSwitch("no-sandbox");
+app.commandLine.appendSwitch("disable-gpu-sandbox");
+```
+两处并存:dev 的 `ELECTRON_ARGS` 保留(不动既有链路),代码里再加一份兜底。
+
+**为什么这个修复有效**:
+> `app.commandLine.appendSwitch()` 会向 Chromium 的命令行**追加**开关,
+> 效果与命令行传参等价 —— 但它写在了**应用代码里**,
+> 所以无论谁启动这个进程(dev 的插件、还是用户双击 exe),
+> 参数都必然存在。
+>
+> 时序上必须在 `app.whenReady()` 之前调用:因为 sandbox 初始化发生在
+> app ready 流程的最早期,**晚了就来不及了**(这是 appendSwitch 的硬约束)。
+
+**如何避免再次出现**:
+1. **凡是「必须在进程启动前生效」的配置,参数路径和代码路径各写一份** ——
+   不要假设「启动环境一致」。dev 和 prod 的启动者是两个不同的东西
+2. **打包后第一件事就是跑一遍「用户视角」的启动** —— 双击 exe,而不是
+   `pnpm start`。两者不等价
+3. **`exit code 1` + 零输出 → 优先怀疑「JS 之前就死了」** ——
+   去查命令行参数、环境变量、DLL/资源路径,而不是去查业务代码
+4. **在 dev 里主动验证「去掉参数会怎样」** —— 用 `dev:electron` 不带 workaround 跑一次,
+   能提前暴露对参数的隐式依赖
+
+**学习价值**:
+- **dev 与 prod 的差异不只在 `NODE_ENV`** —— 启动者、工作目录、命令行参数、
+  资源路径、代码签名,全都可能不同
+- **`app.commandLine.appendSwitch` 的时序约束**:必须早于 `app.whenReady()`,
+  因为很多 Chromium 初始化在 ready 之前完成
+- **「静默崩溃」的排查优先级**:无 JS 错误 → 先看进程层(参数/环境/原生依赖),
+  再看 JS 层
+- **workaround 的存放位置也是一种架构决策** —— 放在构建配置里,
+  它的生效范围就只覆盖构建工具启动的那条路径;放进应用代码,才覆盖所有启动路径
+
+---
+
+### Bug-006: Preload 引入 Node 依赖库导致整个桥静默失效
+
+**日期**:2026-10-14
+**类型**:生产环境 / 安全边界(sandboxed preload 模块解析)
+
+**现象**:
+> 阶段 6-3 加完日志功能后,应用界面能正常渲染,但**所有工具全部失效** ——
+> 选文件、系统信息、大文件 Base64 全都不工作。
+> 排查入口只有一句:`window.electronAPI` 是 `undefined`。
+> Renderer 侧没有任何报错、没有异常、DevTools Network/Console 一片安静。
+>
+> 真正的报错藏在 **DevTools Console 最上面两行**(容易被后来的业务日志淹没):
+> ```
+> Unable to load preload script: D:\study\electron-toolbox-learning\dist-electron\preload.js
+>
+> Error: module not found: path
+>     at preloadRequire (VM4 sandbox_bundle:2:151213)
+>     at <anonymous>:7:20
+>     at runPreloadScript (VM4 sandbox_bundle:2:151877)
+> ```
+
+**复现步骤**:
+1. 在 `electron/preload.ts` 里加一行 `import log from "electron-log";`,并在 `exposeInMainWorld` 前后调用 `log.info(...)`
+2. `pnpm dev`
+3. 应用窗口正常出现,UI 正常渲染
+4. 点任意工具 → 全部无反应;Console 里查 `window.electronAPI` → `undefined`
+
+**定位过程**:
+- **第一步(错误方向,值得记录)**:先猜是「`log.info()` 写在 `exposeInMainWorld` 之前,
+  IPC 通道还没就绪,把桥初始化打断了」→ 把 `log.info()` 挪到文件**最末尾** → **Bug 依然存在**。
+  这一步的价值是**排除法**:证明失败点不在我们自己的业务代码顺序上。
+- **第二步(关键转折)**:让用户**完整截图 DevTools Console 的最顶部**,
+  而不是只看我们自己打的业务日志。第一行 `Unable to load preload script` 直接给出答案。
+  → 教训:**preload 的失败点在「我们的代码」之外,必须去 Console 最顶部找**。
+- **第三步**:读 `dist-electron/preload.js` 的**前 14 行**,发现 bundle 顶部有 **9 行 hoisted require**:
+  ```
+  L5  const require$$0$5 = require("electron");          ← 白名单内,合法
+  L6  const require$$2   = require("path");              ← 从这一行开始炸
+  L7  const require$$0$1 = require("child_process");
+  L8  const require$$1   = require("os");
+  L9  const require$$0   = require("fs");
+  L10 const require$$0$2 = require("util");
+  L11 const require$$0$3 = require("events");
+  L12 const require$$0$4 = require("http");
+  L13 const require$$1$1 = require("https");
+  ```
+  验证命令:
+  ```powershell
+  Select-String -Path "dist-electron\preload.js" -Pattern '^const require\$\$'
+  ```
+- **第四步**:把 9 行 require 与 **sandboxed preload 的 require 白名单**
+  (`electron` / `events` / `timers` / `url`)逐行对照 ——
+  `path` 不在白名单里,所以 **L6 是第一个失败的语句**,与 Console 报错完全对应。
+- **第五步(验证修复)**:改造后重新 `pnpm build`:
+  ```
+  dist-electron/preload.js  0.98 kB   ← 从 80898 字节降到 981 字节
+  ```
+  bundle 全文只剩 **1 个** `require("electron")`,9 行 hoisted require 全部消失。
+
+**根本原因**:
+> 完整因果链(五步,缺一不可):
+>
+> ```
+> ① preload.ts 里 import electron-log
+>    → Vite/Rollup 把它【打包进】preload.js
+>    (vite.config.ts 的 rollupOptions.external 只排除了 "electron",没有排除它)
+>
+> ② electron-log 的入口是【运行时分支】:
+>      const isRenderer = typeof process === "undefined" || process.type === "renderer";
+>      if (isRenderer) { ... } else if (isMain) { ... } else { ... }
+>    运行时分支 = 打包器无法 tree-shaking
+>    → main 和 node 两个变体【也进了包】,即使我们只要 renderer 那一份
+>
+> ③ 那两个变体要 require("path") / require("fs") / ...
+>    而 Rollup 的 CJS 互操作会把这些 require【提升到 bundle 最顶部】,
+>    编译成「模块加载时立刻执行」的语句,而不是「用到时才执行」
+>
+> ④ preload 运行在 sandbox 模式(Electron 20+ 默认 sandbox: true),
+>    可用 require 白名单只有一个很小的集合:electron / events / timers / url
+>    → require("path") 当场抛 `module not found: path`
+>
+> ⑤ preload 脚本在【我们自己写的任何一行代码执行之前】就死了
+>    → contextBridge.exposeInMainWorld 从未执行
+>    → Renderer 里 window.electronAPI 就是 undefined
+> ```
+>
+> **一句话总结**:sandboxed preload 不是 Node 环境,而 `import` 一个第三方库
+> 会把它的整棵依赖树(含 Node 内置模块)带进 bundle 的**加载期**。
+
+**修复方案**:
+1. **`electron/preload.ts` 只保留 `import { contextBridge, ipcRenderer } from "electron"`** ——
+   删掉 `electron-log`,Preload 退回纯粹的「白名单 + 转发」。
+   Renderer 侧日志改为**转发给 Main**:
+   ```ts
+   // preload.ts
+   function forwardLog(level: LogLevel, args: unknown[]): void {
+     // IPC 参数必须可结构化克隆,所以先拍平成字符串
+     ipcRenderer.send("log:write", {
+       level,
+       message: args.map(formatLogArg).join(" "),
+     });
+   }
+   contextBridge.exposeInMainWorld("electronAPI", {
+     log: {
+       info:  (...a) => forwardLog("info", a),
+       warn:  (...a) => forwardLog("warn", a),
+       error: (...a) => forwardLog("error", a),
+       debug: (...a) => forwardLog("debug", a),
+     },
+     // ...
+   });
+   ```
+2. **`electron/main.ts` 新增接收端**(Renderer 不可信,入参必须校验):
+   ```ts
+   ipcMain.on("log:write", (_event, payload: unknown) => {
+     if (typeof payload !== "object" || payload === null ||
+         typeof (payload as { message?: unknown }).message !== "string") {
+       log.warn("[main] log:write received malformed payload, dropped");
+       return;
+     }
+     const { level, message } = payload as { level?: unknown; message: string };
+     const safeLevel: "info" | "warn" | "error" | "debug" =
+       level === "warn" || level === "error" || level === "debug" ? level : "info";
+     log[safeLevel](`[renderer] ${message}`);
+   });
+   ```
+3. **`electron/logger.ts` 删除 `initRendererLogger()`** —— 它建立在
+   「preload 可以自由 import npm 库」这个已被证伪的前提下,原地留注释说明为什么不复活它。
+4. **`src/tools/renderer-log.ts` 保持 API 不变**(`rendererLog.info/warn/error/debug`),
+   只更新头注释记录真实链路 —— 上层组件一行都不用改。
+
+**为什么这个修复有效**:
+> 修复的本质不是「换个写法」,而是**把 electron-log 移出 preload 的依赖图**。
+> preload 的 require 图里只剩 `electron`(白名单内),bundle 顶部不再有
+> 任何 Node 内置模块的 require,于是模块加载期不可能失败。
+> 日志能力没有丢:它改走 **IPC 单向通道**(`send` / `on`)由 Main 落盘 ——
+> 而 Main 本来就是完整的 Node 环境,`electron-log` 在那里毫无限制。
+>
+> **用 `send`/`on` 而不是 `invoke`/`handle` 的理由**:日志是单向通知,
+> 发送方不需要回执。用 `handle` 会给 Renderer 侧留下一个永远不 `resolve`
+> 也没人 `await` 的 Promise,纯属噪音。
+
+**如何避免再次出现**:
+1. **把「sandboxed preload 的 require 白名单」当成硬约束记在心里**:
+   `electron` / `events` / `timers` / `url` —— 就这四个。
+   Preload 里出现任何其他 `import`,先问一句:**这个库的依赖树里有 Node 内置模块吗?**
+2. **给 preload 加构建期护栏**:preload 的 Vite 配置里显式声明
+   `external: ["electron"]` 之外,可加一条产物检查 ——
+   bundle 里出现 `require("path"|"fs"|"child_process"|...)` 直接让构建失败。
+3. **看到 `window.electronAPI === undefined`,第一步永远是看 Console 最顶部** ——
+   搜 `Unable to load preload script`。它比任何业务日志都早、都准。
+4. **不要在 preload 里「顺手」用日志/工具库** —— Preload 的定位是
+   「最小受控桥」,它每多一个依赖,攻击面和失败面就同时变大。
+5. **日志属于「基础设施」不属于「能力」**:它不进阶段 5 的 `ctx` 裁剪,
+   而是像 `console` 一样全局可用 —— 但实现上必须遵守上面的分层。
+
+**学习价值**:
+- **sandboxed preload 不是 Node 环境** —— 只有 `ipcRenderer` / `contextBridge`
+  等极少数能力,不能 `require` fs / path / child_process
+- **「没被用到的 import」不等于「不会执行」** —— 顶层 side effect 会被保留,
+  并被 CJS 互操作**提升到 bundle 顶部**,变成模块加载期的同步执行语句
+- **运行时分支是 tree-shaking 的杀手** —— 库入口里一个
+  `if (isRenderer) ... else if (isMain) ...`,就能让打包器把**所有**分支
+  的依赖都拖进来。这是选型时要看的隐藏成本
+- **preload 加载失败是【静默】的** —— Renderer 只看到 `undefined`,
+  不抛错、不阻断渲染。**必须**去 DevTools Console 顶部找
+  `Unable to load preload script`
+- **失败点在「你的代码之外」时的排查顺序**:先看 Console 真实报错 →
+  再看构建产物(bundle 顶部)→ 再对照运行环境的受限清单(白名单)
+- **诊断方向错了也要记录** —— 第一版「`log.info()` 顺序问题」的猜测虽然是错的,
+  但它做了一次干净的排除实验;**把「猜错」写进文档,比只写正确答案更有价值**
+- **「契约不变、实现替换」的改造方式**:`rendererLog` 的对外 API 一行没动,
+  换掉的是底层链路 —— 这正是好抽象的回报
+
+---
+
+### Bug-007: 崩溃目录是手写拼接的假路径(日志指向一个永远不会有文件的目录)
+
+**日期**:2026-10-15
+**类型**:可观测性 / 「代码里写着一条从未被验证过的关于系统行为的事实」
+
+**现象**:
+> 阶段 6-3 测 `debug:crash`。调用 `window.electronAPI.debugCrash()` 之后进程确实退出了,
+> 但按日志里打印的「crash dir」去找 dump 文件 —— **那个目录根本不存在**。
+> userData 下只有一个 `Crashpad\` 目录,而且 `Crashpad\reports` 是**空的**;
+> 全盘搜 `.dmp` 一个都没有。
+
+**定位过程**:
+1. 回读 `electron/logger.ts` 里的那一行:
+   ```ts
+   log.info(`[main] crash dir: ${join(appUserDataSafe(), "crashes")}`);
+   ```
+   目录名是**手写拼出来的**,不是问系统要的。
+2. 对照 Electron API:压根没有 `getPath("crashes")` 这个名字。
+   Chromium Crashpad 的真实落盘位置是 **`app.getPath("crashDumps")`**
+   (Windows 上 = `<userData>\Crashpad\reports`)。
+3. 于是「日志说的路径」和「Crashpad 真正写的路径」是两个地方 ——
+   差得不算远,但足够让人在那里白找半天。
+
+**根本原因**:
+> 手写拼接 ≠ 查询系统。`join(userData, "crashes")` 只是「猜一个看起来合理的名字」,
+> 它既没问过 Electron,也没被任何一次成功写入验证过。
+> 危险不在「猜错了」,而在于**它以确定的语气输出** ——
+> 排查者会直接相信它,然后在错误的目录里反复找文件。
+
+**修复方案**:
+1. `crashDumpsPath()` 改为 `app.getPath("crashDumps")`;取不到时明确输出
+   `unknown(crashDumps 不可用)`,**而不是编一个路径出来**。
+2. **根治要等 Bug-008 的结论** —— 光「路径是真话」还不够,还得**真的写进去**:
+   ```ts
+   if (choice.source !== "none" && choice.source !== "userData") {
+     repointCrashDumps(join(choice.dir, "crashes")); // mkdir + app.setPath("crashDumps", dir)
+   }
+   crashReporter.start({ uploadToServer: false, compress: true });
+   ```
+   顺序是硬约束:`app.setPath("crashDumps", ...)` 必须在 `crashReporter.start()` **之前**,
+   一旦 `start()` 完成,Crashpad 就把路径固定了。
+
+**待查(诚实记录)**:
+> `Crashpad\reports` 为空的最可能解释,是 Bug-008 的同一个环境约束:
+> 崩溃转储写 `%APPDATA%` 同样被拒 → Crashpad 拿不到可写目录 → 不产生 `.dmp`。
+> 这解释了「路径对、权限不对」也会表现成「什么都没有」。
+> 本机尚未拿到一份 `.dmp` 做完整确认,列为待验证项。
+
+**如何避免再次出现**:
+1. **凡是「关于系统行为的事实」,要么问系统要,要么写清这是推测。**
+   路径、版本、默认值、平台差异 —— 全属于这一类。
+2. **日志里的路径必须是程序验证过的路径**,不能是程序猜的路径。
+   判别法:这个值,我有没有一步操作能证明它真的成立?
+3. **Crashpad 目录的坑**:`crashDumps` 是唯一正确入口;
+   `setPath` 必须早于 `crashReporter.start`。
+
+**学习价值**:
+- 与 Bug-004 / Bug-006 / Bug-008 同族:**代码里写着一条从未被验证过的断言**。
+  未经验证的不变量,比没有不变量更危险
+- **可观测性设施本身也要被观测** —— 日志说错话比不打日志更贵
+- 这个 Bug 的完整修复依赖下一个 Bug 的结论:**修 Bug 常常要回头改上一个 Bug 的修法**
+
+---
+
+### Bug-008: electron-log 写日志彻底静默 —— 文件不存在、终端不报错、不抛异常
+
+**日期**:2026-10-15
+**类型**:生产环境 / 第三方库静默吞错 + 运行环境权限
+
+**现象**:
+> 阶段 6-3 引入 electron-log 之后,`%APPDATA%\electron-toolbox-learning\logs\` 下
+> **从来没有出现过 main.log**。更怪的是:
+> - 终端里看不到 `[main] logger initialized` 那几行自报家门的日志
+> - 没有异常、没有报错,应用功能一切正常(只是没有日志)
+> - 手动清空日志目录后重启,目录**依旧是空的**
+>
+> 而 10/13 第一次加日志时**是写成功的**(main.log 里有 4 行),之后就不写了 —— 代码没改过。
+
+**排查过程(三轮探针,每一步都必须可被证伪)**:
+1. **先证伪「构建没生效」**:比对 `electron/preload.ts` 与 `dist-electron/preload.js`
+   的 mtime 与字节数 → 产物比源码新,假设被推翻。
+2. **旁路探针**:在 `electron/main.ts` 里加临时探针(用完即删),绕开 electron-log、
+   也绕开终端,直接 `appendFileSync` 写工作区里的 `logger-probe.txt`。结论:
+   - main.js 已加载;`initMainLogger()` 正常返回没抛错;
+   - `log.transports.file.getFile().path` = `<userData>\logs\main.log`(路径正确);
+   - `console.level` / `file.level` 配置都生效;
+   - `log.info()` 返回且没抛错。
+   - **⇒ 路径解析、配置、初始化全部正确,问题不在我们这层。**
+3. **挂钩子看消息走到哪**:给三个 transport 的 `writeFn` 打钩子 ——
+   **HOOK 命中 3 次**(console / file / ipc 都收到了同一条消息,level 也都通过)。
+   **⇒ 消息确实到达了 file transport,不是「没走到」。**
+4. **直接调底层**:`fs.writeFileSync("...\\logs\\main.log", "x")` ——
+   **抛错 `EPERM: operation not permitted, open '...\logs\main.log'`**。
+5. **排除 ACL**:`icacls` 显示该目录上 `Administrator` 是 Full Control;
+   用 PowerShell 往同一路径写文件**成功**;而 Electron 进程的 GetOwner 也是 Administrator。
+   ⇒ 差别不在 ACL,而在**进程令牌** —— 应用进程带着受限的沙箱身份,
+   写入范围被限制在工作区内。
+6. **独立 Electron 进程复核**:单独跑一个 electron 脚本,对
+   `userData` / `temp` / `appData` / `sessionData` 跑同一套写测试 ——
+   **全部 EPERM**,而工作区内可写。⇒ 确认是「写入范围」的问题,不是某个目录坏了。
+
+**根本原因(两层,缺一不可)**:
+> **第一层(触发器)**:`fs.writeFileSync(<userData>\logs\main.log)` 被系统拒绝(EPERM)。
+> 运行环境对用户目录只给读权限,只有工作区可写。
+>
+> **第二层(放大器,最贵的一层)**:electron-log 5.x 的 `File.writeLine()` 把写盘
+> 包在 try/catch 里,catch 中只做一件事:
+> ```js
+> this.emit("error", new Error(`Couldn't write to ${this.path}. ${e.message}`), this);
+> ```
+> 而 **File 实例上没有任何 error 监听器**;这个事件最终被 `processMessage()` 的
+> try/catch 接住,交给 `processInternalErrorFn()` —— 基类里那个函数是**空实现 `{}`**。
+>
+> ⇒ 结果:**没有文件、终端没有任何报错、不抛异常**。
+> 「写日志失败」这件事,被日志库自己咽了下去。
+
+**为什么 10/13 能写、之后不能**:
+> 同一份代码,**运行环境变了** —— 进程从「可写用户目录」变成「只能写工作区」。
+> 「昨天还好好的」这类线索必须当成一等证据:它几乎总在说
+> **变的是环境,不是代码**。
+
+**修复方案(重写 `electron/logger.ts`,原则:允许写不进去,但不允许不吭声)**:
+1. **可写性预检** `isDirWritable()`:真的 `mkdirSync` → 真的 `writeFileSync` 探针文件
+   → 真的 `readFileSync` 读回来比对 → 再 `unlinkSync` 删掉。
+   (只判断 `existsSync` 发现不了只读 ACL;只写不读回发现不了重定向层。)
+2. **回退链**:`userData/logs` → `temp/electron-toolbox/logs` →(仅 dev)`工作区/logs`,
+   第一个通过预检的胜出,结果记为 `userData | temp | workspace | none`。
+3. **显式指定路径**:`log.transports.file.resolvePathFn = () => logFilePath`,
+   不再依赖 electron-log 那套「自己推导、错了也不说」的隐式链。
+4. **失败必须可见**:
+   - 走回退链时用 `console.error` 大声报告 —— **刻意不走 electron-log**,
+     因为「日志系统自己坏了」这件事不能被这个坏掉的系统承载;
+   - `installFileErrorSink()`:给 File 实例挂 `on("error", ...)`,并接管
+     `processInternalErrorFn`,把那个无人理会的黑洞补上消费者;
+   - 一条路都走不通 → 关掉文件传输 + 明确说明原因。
+5. **不信任「应该写成功了」**:打完第一行日志后 `existsSync(logFilePath)` 回头验证,
+   不存在就再报一次。
+6. **崩溃目录跟着一起回退**(见 Bug-007)。
+
+**验证**:
+- `tsc -p tsconfig.node.json` 与 `tsc -p tsconfig.json` → 均 exit 0
+- 真实 `pnpm dev` + 指定 `--user-data-dir` 四轮:
+  可写 userData → 选中 userData 且 `main.log` 真的出现;
+  不可写 userData → 自动回退 workspace 且 `logs\main.log` 真的出现;
+  全部不可写 → 文件日志关闭并明确报错;
+  `debugUncaught` 经 IPC 转发 → Renderer 侧日志也进了 main.log
+- 产物核查:`dist-electron/main.js` 里新 logger 的四段文案各命中 1 次
+
+**如何避免再次出现**:
+1. **引入任何「日志 / 持久化 / 上传」类第三方库时,先问一句:
+   它失败了,会不会告诉我?** 一个把失败咽下去的库,能把排查方向带偏几小时。
+2. **不要用「库能跑」代替「库在工作」** —— 要让程序自己报告真相。
+   探针必须**绕开所有可疑环节**(不经过 electron-log、也不经过终端),
+   写到确定可写的地方。
+3. **探针必须跑在与被测程序相同的权限/环境下** —— 用沙箱身份跑的探针
+   只能得到 EPERM,那测的是沙箱,不是应用。
+4. **「文件不存在」永远只有三种可能**:没写 / 写到别处 / 写了又被删。
+   逐条设计成可证伪的观察,不要停在猜测。
+5. **日志目录不能假设**:userData 可能只读、安装目录只读、`%APPDATA%` 可能被策略限制。
+   任何要落盘的东西,都需要「预检 + 回退 + 响亮失败」三件套。
+
+**学习价值**:
+- **静默失败是最贵的一类 Bug** —— 没有报错的地方,才是排查的盲区
+- **第三方库的失败传播链必须自己查过**:谁能接住、转成什么、交给谁
+- **「同样代码昨天能用」= 环境变量**(权限、工作目录、启动者、系统策略)
+- **可观测性设施本身要容错**:日志可以丢,但不能撒谎
+- **修 Bug 要修完整**:改了日志目录,崩溃目录必须跟着走(Bug-007)
+
+---
+
+### 阶段 6-3 验收记录(2026-10-16)
+
+**验收项(4/4 通过)**:
+
+| # | 验收项 | 结果 |
+|---|--------|------|
+| 1 | 冷启动:可写性预检 → 回退 → 落盘 | ✅ 终端报的路径与 `logs\main.log` 实际内容一致(旧代码里这两件事可以脱钩) |
+| 2 | Renderer 日志经 IPC 转发落盘 | ✅ `[renderer] ...` 出现在 main.log(Bug-006 回归通过) |
+| 3 | `debug:uncaught` 触发真正的 uncaughtException | ✅ 栈顶 `Immediate.<anonymous>` + `process.processImmediate` |
+| 4 | `debug:crash` 产出 minidump | ✅ `logs\crashes\reports\*.dmp`(实测 32.88 MB) |
+
+**本次纠正的一处「未验证的事实」(第四条同族错误)**:
+> `crashDumpsPath()` 的注释里我曾写下「Windows 上是 `<userData>\Crashpad\reports`」——
+> 这是**没验证就写下的关于系统行为的事实**。探针实测推翻:`app.getPath('crashDumps')`
+> 返回的是 Crashpad 的**数据库根**(`<userData>\Crashpad`)。
+> minidump 按 Crashpad 自己的约定落在 `<数据库根>\reports\` 下。
+> 同族: Bug-004(声明与实现不一致)/ Bug-006(注释承诺的护栏不存在)/ Bug-007(手写假崩溃路径)/ 本条。
+> 日志现在两行都打、各带标签:`crash dir (Crashpad 数据库根)` 与 `crash dumps (minidump 实际落盘处)`。
+
+**写进复盘的代价(必须记住)**:
+> 测试 3 之后应用「活着」,是因为我们的 `uncaughtException` handler **只记日志、不退出**。
+> **这不是生产策略**:未知异常之后进程状态可能已损坏(内存、句柄、半途的 IPC),
+> 继续运行可能静默产出错误结果。生产实践是「记日志 → 有序退出 → 重启」。
+> 这里故意不退出,只是为了让人能看见日志。
+
+**日志目录回退链的实测结论**:本机环境下 `userData` 与 `temp` 两个候选均 EPERM
+(进程写入范围被限制在工作区),最终落到 `workspace`:`D:\study\electron-toolbox-learning\logs\`。

@@ -28,6 +28,7 @@
 
 import { useState } from "react";
 import type { ToolProps } from "./types";
+import { rendererLog } from "./renderer-log";
 
 export function Base64Tool({ ctx }: ToolProps) {
   const [base64, setBase64] = useState("");
@@ -66,7 +67,22 @@ export function Base64Tool({ ctx }: ToolProps) {
       // 方案 1:用 FileReader(浏览器原生,推荐用于大文件)
       // 方案 2:用 btoa + String.fromCharCode(小文件可用,大文件会栈溢出)
       // 这里用方案 1,因为阶段 4 会扩展到更大文件
-      const blob = new Blob([result.buffer]);
+      //
+      // ▼ 关于这里的类型收窄,值得停一下看清楚(TS 5.7 的破坏性变更)
+      //
+      //   TS 5.7 起 Uint8Array 变成了泛型:Uint8Array<TArrayBuffer extends ArrayBufferLike>。
+      //   裸写 Uint8Array 就等于 Uint8Array<ArrayBufferLike> —— 包含 SharedArrayBuffer
+      //   支撑的视图。而 lib.dom 里 BlobPart 只收 ArrayBufferView<ArrayBuffer>(不收 shared)。
+      //   于是「IPC 回来的 Uint8Array」在类型上过不了 new Blob([...]) —— 报 TS2322。
+      //
+      //   ★ 收窄的依据不是「我觉得没事」,而是【IPC 的传输保证】:
+      //     跨进程走结构化克隆,它一定复制出一份挂在普通 ArrayBuffer 上的新视图,
+      //     永远不可能是 SharedArrayBuffer。所以这里收窄是【陈述事实】,不是妥协。
+      //
+      //   为什么不用 new Blob([new Uint8Array(result.buffer)]) 绕开它?
+      //     那会白白多复制一整份文件(Blob 构造本身已经复制一次)。
+      //     文件上限以后还会涨,「为了类型好看多一次 O(n) 复制」正是我们一直在避免的东西。
+      const blob = new Blob([result.buffer as Uint8Array<ArrayBuffer>]);
       const reader = new FileReader();
 
       reader.onload = () => {
@@ -79,6 +95,7 @@ export function Base64Tool({ ctx }: ToolProps) {
       };
 
       reader.onerror = () => {
+        rendererLog.error("Base64Tool: FileReader 读取失败");
         setError("文件读取失败(FileReader 错误)");
         setLoading(false);
       };
@@ -87,6 +104,7 @@ export function Base64Tool({ ctx }: ToolProps) {
     } catch (e) {
       // Main 抛出的错误会通过 IPC 传回这里
       // 比如「文件过大」错误就是 Main 抛的
+      rendererLog.error("Base64Tool: 选文件失败", e);
       setError((e as Error).message);
       setLoading(false);
     }

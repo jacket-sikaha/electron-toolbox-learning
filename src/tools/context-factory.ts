@@ -34,6 +34,18 @@ interface RawElectronAPI {
   onBase64Progress(
     callback: (data: { processed: number; total: number }) => void
   ): () => void;
+
+  // 阶段 6-3:日志 API(electron-log 通过 IPC 转发到 Main 统一写文件)
+  log: {
+    info: (...args: unknown[]) => void;
+    warn: (...args: unknown[]) => void;
+    error: (...args: unknown[]) => void;
+    debug: (...args: unknown[]) => void;
+  };
+
+  // 阶段 6-3:crashReporter 调试通道(临时,阶段 6 结束后删除)
+  debugCrash: () => Promise<void>;
+  debugUncaught: () => Promise<void>;
 }
 
 function rawApi(): RawElectronAPI {

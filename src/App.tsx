@@ -36,6 +36,7 @@ import { useState, useMemo } from "react";
 import { TOOL_MANIFEST, getToolEntry } from "../shared/tool-manifest";
 import { TOOL_COMPONENTS, auditRegistry } from "./tools";
 import { buildContext } from "./tools/context-factory";
+import { rendererLog } from "./tools/renderer-log";
 
 // 开发期自检:清单里的每个 id 都要有对应组件,反之亦然。
 // 在模块加载时跑一次,如果有不一致直接打 console.error。
@@ -43,7 +44,7 @@ import { buildContext } from "./tools/context-factory";
 {
   const problems = auditRegistry(TOOL_MANIFEST.map((t) => t.meta.id));
   if (problems.length > 0) {
-    console.error("[registry audit]\n" + problems.join("\n"));
+    rendererLog.error("[registry audit]\n" + problems.join("\n"));
   }
 }
 

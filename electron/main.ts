@@ -25,12 +25,62 @@ import os from "node:os";
 // 阶段 5:Main 侧 import TOOL_MANIFEST —— 权限声明从「实现细节」变成「可被程序查询的元数据」
 import { TOOL_MANIFEST, getToolsUsingPermission } from "../shared/tool-manifest";
 
+// 阶段 6-3:日志 + 崩溃报告
+// initMainLogger 内部会调用 crashReporter.start(),必须在 app.whenReady() 之前调用,
+// 因为 crashReporter 需要在 Chromium 初始化最早期注册才能捕获 crash。
+import { initMainLogger } from "./logger";
+import log from "electron-log";
+
+// 初始化日志 —— 必须在 app ready 之前(crashReporter.start 早期注册)
+initMainLogger();
+
 // 关键设计 1:__dirname 在 CommonJS 环境下可直接用
 // electron/main.ts 会被 tsc 编译成 CommonJS 输出到 dist-electron/,
 // 所以 __dirname 指向 dist-electron/。
 // 但要记住一个常见的 prod Bug:打包后 __dirname 可能指向 asar 内部,
 // 需要配合 process.resourcesPath 处理资源路径。阶段 6 会专门讲。
+
+// ============================================================================
+// 阶段 6 Bug:dev 模式的 --no-sandbox 在 prod 模式丢失
+// ----------------------------------------------------------------------------
+// dev 模式下,vite-plugin-electron 通过 ELECTRON_ARGS 把 --no-sandbox
+// --disable-gpu-sandbox 作为命令行参数传给 electron.exe。
+// 但 prod 模式下用户直接双击 exe,没有 vite-plugin-electron,
+// 这两个参数丢失 → Windows 11 25H2 Chromium sandbox 初始化 Bug(electron#52098)
+// 触发 → 进程直接崩溃,无 JS 错误输出,只有 exit code 1。
+//
+// 修复:在 app ready 之前用 commandLine.appendSwitch 注入参数。
+// appendSwitch 必须在 app.whenReady() 之前调用,因为 sandbox 初始化
+// 发生在 app ready 流程的最早期,晚了就来不及。
+// ============================================================================
+app.commandLine.appendSwitch("no-sandbox");
+app.commandLine.appendSwitch("disable-gpu-sandbox");
+
 const isDev = !app.isPackaged;
+
+// ============================================================================
+// 阶段 6-3:全局未捕获异常兜底
+// ----------------------------------------------------------------------------
+// 这是最后一道防线。如果 ipcMain.handle 里没有 try/catch,
+// 或者某个异步操作 reject 了但没有 .catch() —— 异常会冒泡到这里。
+//
+// 为什么不用 process.exit(1)?
+//   发生异常时应该记录日志 + 让应用尽量继续运行(或优雅退出)。
+//   直接 exit(1) 会让用户毫无感知,也来不及写日志。
+//
+// crashReporter 和这里的区别:
+//   这里捕获的是 JS 异常(有调用栈、有上下文)
+//   crashReporter 捕获的是 native crash(C++ 层段错误,JS 层根本看不到)
+// ============================================================================
+process.on("uncaughtException", (error) => {
+  log.error("[main] uncaughtException:", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log.error("[main] unhandledRejection:", reason);
+});
+
+log.info(`[main] app starting (isDev=${isDev}, v${app.getVersion()})`);
 
 // 关键设计 2:dev/prod 判断用 app.isPackaged,不用 process.env.NODE_ENV
 // - dev 模式:app.isPackaged === false → 加载 Vite dev server
@@ -197,6 +247,7 @@ function auditPermissions() {
 
 function registerIpcHandlers() {
   ipcMain.handle("tool:base64:fs:read", async () => {
+    log.info("[main] tool:base64:fs:read invoked");
     // 1. 弹系统文件选择框(只能在 Main 调,Renderer 碰不到 dialog)
     const result = await dialog.showOpenDialog({
       title: "选择要转 Base64 的文件",
@@ -210,10 +261,12 @@ function registerIpcHandlers() {
 
     // 2. 用户取消选择(dialog 返回 canceled: true)
     if (result.canceled || result.filePaths.length === 0) {
+      log.info("[main] user canceled file selection");
       return null;
     }
 
     const filePath = result.filePaths[0];
+    log.info(`[main] file selected: ${filePath}`);
 
     // 3. 关键设计 6.4:即使方案 2 天然安全,Main 仍要做边界防御
     // - 限制文件大小:避免用户选了一个 10GB 文件把 Main 进程 OOM
@@ -224,6 +277,7 @@ function registerIpcHandlers() {
     const stats = await stat(filePath);
     const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
     if (stats.size > MAX_FILE_SIZE) {
+      log.warn(`[main] file too large: ${(stats.size / 1024 / 1024).toFixed(2)}MB`);
       throw new Error(
         `文件过大(${(stats.size / 1024 / 1024).toFixed(2)}MB),这个工具限制 10MB 以内。请改用「大文件 Base64」(Stream + Worker)。`
       );
@@ -448,6 +502,83 @@ function registerIpcHandlers() {
   // 不能指定「隐藏哪个窗口」—— 不开这个口子,就少一类攻击面。
   ipcMain.handle("tool:system-info:window:hide", () => {
     mainWindow?.hide();
+  });
+
+  // ==========================================================================
+  // 阶段 6-3:crashReporter 实验通道(临时,阶段 6 结束后删除)
+  // --------------------------------------------------------------------------
+  // process.crash() 故意触发 native crash(C++ 层段错误)。
+  // try/catch 抓不到这个,因为进程在 C++ 层就死了。
+  // crashReporter 会在进程死亡前写 minidump 到 crashes/ 目录。
+  // ==========================================================================
+  ipcMain.handle("debug:crash", () => {
+    log.info("[main] debug:crash invoked — about to trigger native crash");
+    process.crash();
+  });
+
+  // ⚠ 这个 handler 有个反直觉之处,是整个日志实验里最值钱的一课:
+  //
+  //   ipcMain.handle 内部【必然】有一层 try/catch —— 它要把 handler 抛出的错误
+  //   接住、再主动 reject 回 Renderer。否则调用方的 Promise 会永远 pending。
+  //
+  //   所以在 handler 里直接 throw,【不会】产生 uncaughtException:
+  //     handler 里 throw  → 被 handle 的 try/catch 接住 → 前端看到 rejected Promise
+  //                       → process.on("uncaughtException") 不触发 → 写不进 main.log
+  //
+  //   要让 throw 变成「真正没人接的异常」,必须让它【晚一点】抛出 ——
+  //   晚到 handler 已经返回、handle 的那层 try/catch 已经结束之后。
+  //   setImmediate 就是干这个的:把回调排到当前调用栈清空之后再执行。
+  //   那时抛出的异常才直达 process 的 uncaughtException。
+  //
+  //   对照记忆:
+  //     handler 里 throw   = 异常发生在「调用栈还没退出」时 → 有人接
+  //     setImmediate 里 throw = 异常发生在「调用栈已清空」之后 → 没人接 → uncaughtException
+  ipcMain.handle("debug:uncaught", () => {
+    log.info(
+      "[main] debug:uncaught invoked — throw 将在 setImmediate 里抛出(跳出 handle 的 try/catch)",
+    );
+    setImmediate(() => {
+      throw new Error("故意抛出的未捕获异常(debug:uncaught)");
+    });
+    return "已排入 setImmediate,请查看 main.log 里的 uncaughtException 那一行";
+  });
+
+  // ==========================================================================
+  // 阶段 6-3:接收 Renderer 转发来的日志(Bug-006 修复后新增)
+  // --------------------------------------------------------------------------
+  // Preload 不能 import electron-log —— 见 electron/preload.ts 文件头 Bug-006:
+  // sandboxed preload 的 require 白名单只有 electron/events/timers/url,
+  // 而 electron-log 顶层会 require("path") → 整个 preload 加载失败。
+  //
+  // 所以 Renderer 侧日志走 ipcRenderer.send("log:write", {...}) 送到这里,
+  // 由 Main 统一用 electron-log 写进日志文件。
+  //
+  // 为什么用 on 而不是 handle?
+  //   这是单向通知,发送方不需要回执。用 handle 会让 Renderer 侧返回一个
+  //   永远不 resolve 也没人 await 的 Promise,徒增噪音。
+  //
+  // ⚠ 纪律:Renderer 是【不可信边界】,入参必须校验
+  //   level 若不在白名单里,直接 log[level] 会得到 undefined 进而 TypeError。
+  //   校验后一律归一到 info,既安全又不会丢日志。
+  // ==========================================================================
+  ipcMain.on("log:write", (_event, payload: unknown) => {
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      typeof (payload as { message?: unknown }).message !== "string"
+    ) {
+      // 非法载荷:丢弃,但留一条痕迹(便于排错「日志怎么少了」)
+      log.warn("[main] log:write received malformed payload, dropped");
+      return;
+    }
+
+    const { level, message } = payload as { level?: unknown; message: string };
+    const safeLevel: "info" | "warn" | "error" | "debug" =
+      level === "warn" || level === "error" || level === "debug"
+        ? level
+        : "info";
+
+    log[safeLevel](`[renderer] ${message}`);
   });
 
   // 阶段 5:启动时审计权限声明 —— 把隐式事实变成显式输出

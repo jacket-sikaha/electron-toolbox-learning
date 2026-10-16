@@ -35,6 +35,7 @@
 
 import { useEffect, useState } from "react";
 import type { Base64Progress, BigBase64Result, ToolProps } from "./types";
+import { rendererLog } from "./renderer-log";
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
@@ -73,6 +74,7 @@ export function BigFileBase64Tool({ ctx }: ToolProps) {
       const res = await ctx.fs!.bigBase64((p) => setProgress(p));
       setResult(res);
     } catch (e) {
+      rendererLog.error("BigFileBase64Tool: 大文件处理失败", e);
       setError((e as Error).message);
     } finally {
       setLoading(false);
