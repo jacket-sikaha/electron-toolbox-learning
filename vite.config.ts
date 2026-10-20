@@ -99,7 +99,15 @@ export default defineConfig({
           build: {
             outDir: "dist-electron",
             rollupOptions: {
-              external: ["electron"],
+              // 阶段 6-4:electron-updater 必须 external,不能被打包进来。
+              //
+              // 判断法(一句话):这个库在运行时要不要「按路径找自己的文件」?要,就别 bundle。
+              // electron-updater 运行时要去读 resources/app-update.yml、调用本地工具、
+              // 用动态 require 加载平台专用实现 —— 一旦被打成一个 bundle,
+              // 它关于「我在文件系统哪个位置」的路径假设就全错了。
+              //
+              // 这和 Bug-006 是同一个方向上的事:打包器会改变依赖树的形态。
+              external: ["electron", "electron-updater"],
             },
           },
         },

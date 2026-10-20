@@ -1,6 +1,6 @@
 {
   "name": "electron-toolbox-learning",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Electron Desktop Toolbox - learning project",
   "main": "dist-electron/main.js",
@@ -19,15 +19,16 @@
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.1",
     "cross-env": "^7.0.3",
-    "electron": "^31.0.0",
+    "electron": "^31.7.7",
     "electron-builder": "^26.15.3",
-    "typescript": "^5.3.3",
-    "vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21",
     "vite-plugin-electron": "^0.28.0",
     "vite-plugin-electron-renderer": "^0.14.0"
   },
   "dependencies": {
     "electron-log": "^5.4.4",
+    "electron-updater": "^6.8.9",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
@@ -40,6 +41,12 @@
     "files": [
       "dist/**",
       "dist-electron/**"
+    ],
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "http://127.0.0.1:8080/updates"
+      }
     ],
     "win": {
       "target": [

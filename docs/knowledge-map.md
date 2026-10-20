@@ -45,6 +45,7 @@
 - [x] ✅ 生产路径问题(__dirname / resourcesPath / **userData 是否可写**)—— Bug-007 + Bug-008 实战
 - [x] ✅ 第三方库静默失败:失败传播链必须自己查(谁能接住、转成什么、交给谁)—— Bug-008 实战
 
+- [x] ✅ 自动更新的信任边界:签名只管「执行」这一段,HTTPS 管传输,app-update.yml 管去哪儿;骗与卡不归签名管 —— ADR-009
 ## Performance 性能
 
 - [ ] 🔴 启动时间(冷启动/preload 提前/按需加载)—— 阶段 7
@@ -67,8 +68,12 @@
 - [ ] 🔴 测试(Playwright Electron)—— 阶段 6
 - [x] ✅ 日志(electron-log)—— 阶段 6 完成(Main/Renderer 两层 + IPC 转发 + 文件轮转 + **可写性预检 / 回退链**)—— Bug-008 实战
 - [x] ✅ 崩溃报告(crashReporter)—— 阶段 6 完成(本地存储 + crash/uncaught 调试按钮 + 崩溃目录随日志目录一起回退)—— Bug-007 实战
+- [x] ✅ 条件导出(exports conditions)与 Vite `resolve.conditions` —— 同一个包对 main / renderer 有两份实现时,**一律用显式子路径导入**(`pkg/main`),别让打包器替你选条件 —— Bug-009 实战
+- [x] ✅ 依赖可复现性:`lockfile: false` 的取舍(换「改小版本后重装能生效」,代价是可复现性)+ **关键工具链(vite / electron / typescript)版本写死** —— Bug-010 实战
+- [x] ✅ Electron「空壳安装」的识别 —— 判断装好没,**看 `dist\electron.exe` + `dist\version` + `path.txt` 三样,不看目录在不在**;`require("electron")` 报错先分「路径没拿到」还是「二进制不存在」 —— Bug-010 实战
 - [ ] 🔴 ASAR 打包机制 —— 阶段 6
-- [ ] 🔴 自动更新(electron-updater / 签名 / Notarization)—— 阶段 6
+- [x] ✅ 自动更新(electron-updater)—— 阶段 6-4 实现完成:事件驱动 + 三策略(`autoDownload=false` / `autoInstallOnAppQuit=true` / `allowDowngrade=false`)+ `generic` provider 生成 `app-update.yml` + dev 用 `dev-app-update.yml` + `forceDevUpdateConfig`;**本地更新源的端到端实测待做**
+- [ ] 🔴 代码签名与完整性(**sha512 完整性 ≠ 代码签名来源** / latest.yml 自己被篡改怎么办 / macOS Notarization)—— 用户决定暂缓
 
 ---
 
@@ -81,7 +86,7 @@
 | 3 | 生命周期与系统工具(Tray/Menu) | ✅ 完成 | 95%(globalShortcut / 应用菜单待补) |
 | 4 | 大文件与异步(Worker Threads) | ✅ 完成 | 100%(含 Bug-003 实验) |
 | 5 | 插件化扩展架构 | ✅ 完成 | 100%(契约层 + 注册表 + ctx 注入 + 权限裁剪 + Bug-004 实验) |
-| 6 | 工程化与发布 | 🔄 进行中 | 75%(6-1 打包原理 ✅ / 6-2 electron-builder ✅ 已打出安装包,签名按用户决定暂缓 / 6-3 日志 + crashReporter ✅ 验收 4/4,含 Bug-006 / Bug-007 / Bug-008 / 6-4 自动更新 🔄 / 6-5 测试 ⏳ / 复盘 ⏳) |
+| 6 | 工程化与发布 | 🔄 进行中 | 85%(6-1 打包 ✅ / 6-2 electron-builder ✅ 签名按决定暂缓 / 6-3 日志 + crashReporter ✅ 4/4 验收 / 6-4 自动更新 🔄 **检查链路已通**,下载 + 安装待补 / 6-5 测试 ⏳ / 复盘 ⏳) |
 | 7 | 性能与架构演进 | ⏳ 待开始 | 0% |
 
 ## 薄弱点记录
@@ -115,6 +120,11 @@
 - **【待检验 · Bug-008】落盘位置不能假设**:「用户目录一定可写」是错的。任何要落盘的位置都必须有「**预检(真建目录、真写、真读回比对、真删)+ 回退链 + 响亮失败**」三件套。只 `existsSync` 一下不算预检 —— 它发现不了只读 ACL;只写不读回也发现不了重定向层
 - **【待检验 · Bug-008】环境也是变量**:同一份代码,10/13 能写日志、10/15 不能 —— 因为进程**令牌**从「可写用户目录」变成「只能写工作区」。所以「昨天还好好的」必须当成一等证据:它几乎总在说**变的是环境,不是代码**
 
+- **【待检验 · Bug-009】条件导出是双向的坑**:`exports` 里的 `browser` / `default` 条件,按「消费者环境」分发实现。**它能帮你在对的环节选对,也能在对的环节选错** —— Vite 默认 `resolve.conditions` 带 `browser`,给 Main 打包时会静默装进 renderer 那份实现。判断顺序:**先读那个依赖的 `exports` 字段,再决定用什么子路径导入**
+- **【待检验 · Bug-009】类型正确 ≠ 运行时正确**:条件导出里 `types` 和 `default`/`browser` 是**分开选的**。`tsc` 全绿只说明类型对上了,不代表运行时加载的是同一份实现 —— 所以这类错**一定在运行到第一次真正使用才炸**
+- **【待检验 · Bug-010】「装好了」要靠三样东西证明**:Electron 的 npm 包只是下载器,真二进制在 postinstall 里下。判断装好没 = `dist\electron.exe` + `dist\version` + `path.txt`,**不看目录在不在**;`require("electron")` 报错先分「路径没拿到」还是「二进制不存在」
+- **【待检验 · Bug-010】观察 ≠ 解释**:我曾把「版本降到范围下限」解释成「pnpm 无锁文件时解析最低版本」,对照实验直接推翻(干净目录下 `^5.0.0` 解析出 5.4.21)。真因是残缺 `node_modules` 的 reconcile。**机制没验证过就不能写进结论**
+
 ## 已巩固(曾为薄弱点,已通过复述检查)
 
 - ✅ handle/invoke 精确描述:注册/调用,不是订阅/发布(发布订阅是 on/send)。channel 名不一致 → Main 端无人 handle → Promise 永远 pending,不报错不超时
@@ -142,3 +152,5 @@
 - Bug-006:Preload 引入 Node 依赖库(electron-log)导致整个桥静默失效(`window.electronAPI === undefined`,Console 顶部 `Unable to load preload script` + `module not found: path`)→ 见 `bug-lab.md`
 - Bug-007:崩溃目录是手写拼接的假路径(`join(userData,"crashes")`),日志把人指向一个永远不会有文件的目录;真实 API 是 `app.getPath('crashDumps')` → 见 `bug-lab.md`
 - Bug-008:electron-log 写 main.log 被系统拒绝(EPERM)之后**完全静默** —— 不建文件、不打日志、不抛异常。两层根因:①运行环境只允许写工作区,`%APPDATA%` 只读;②electron-log 5.x 的 `File.writeLine` 只 `emit("error")`,而那个 error 事件没有任何消费者 → 重写 logger.ts:可写性预检 + 回退链(userData→temp→workspace)+ 显式 `resolvePathFn` + 补上错误出口 → 见 `bug-lab.md`
+- Bug-009:electron-log 在 Main 进程里被装进了**渲染进程那份实现**(`log.transports` 为 `undefined` → `TypeError: Cannot set properties of undefined`)。根因:`electron-log@5.4.4` 的 `exports` 里 `"."` 同时挂 `browser` 和 `default`,而 Vite 默认 `resolve.conditions` 含 `browser` → 为 Main 打包时命中 `browser` → 打进 `src/renderer/index.js`;`tsc` 全绿因为 `types` 是另一条分支。修复:三处改 `import log from "electron-log/main"` → 见 `bug-lab.md`
+- Bug-010:Electron 装成「空壳」+ 无锁文件导致整条工具链漂移。`electron@31.7.7` 的 `dist\` 只有 16/73 个文件、无 `electron.exe`、无 `path.txt` → `require("electron")` 抛 "failed to install correctly" → 被 `vite-plugin-electron` 的 `spawn` 报成 `ERR_INVALID_ARG_TYPE`(报错位置≠错误来源);连带 `vite 5.0.0 / electron 31.0.0 / typescript 5.3.3` 降级,TS 5.3 不认识 `Uint8Array<ArrayBuffer>` → `Base64Tool.tsx(85,47) TS2315`。修复:清残缺 + `ELECTRON_MIRROR` 重跑 `install.js`(73 文件)+ 精确版本装回 `electron@31.7.7 / vite@5.4.21 / typescript@5.9.3` → 见 `bug-lab.md`

@@ -828,3 +828,224 @@ app.commandLine.appendSwitch("disable-gpu-sandbox");
 
 **日志目录回退链的实测结论**:本机环境下 `userData` 与 `temp` 两个候选均 EPERM
 (进程写入范围被限制在工作区),最终落到 `workspace`:`D:\study\electron-toolbox-learning\logs\`。
+
+---
+
+### Bug-009: electron-log 在 Main 进程里被装进了「渲染进程那份实现」
+
+**日期**:2026-10-19
+**类型**:打包与模块解析 / 条件导出(exports conditions)/ 第三方库双实现
+
+**现象**:
+> 阶段 6-4 加上 `autoUpdater.logger = log` 之后,应用启动即失败,弹出
+> `A JavaScript error occurred in the main process`。终端里的两条线索:
+> ```
+> electron-log/renderer is loaded in the main process.
+> If you want to use electron-log in the main process, import from "electron-log/main".
+> ```
+> ```
+> TypeError: Cannot set properties of undefined (setting 'level')
+>     at initMainLogger (dist-electron/main.js:614:31)
+> ```
+> 而**同一份 `logger.ts` 在阶段 6-3 是跑通了四轮验证的**,一行都没改过。
+
+**复现步骤**:
+1. `electron/main.ts`、`electron/logger.ts` 里都是 `import log from "electron-log"`
+2. 打包 Main(`vite-plugin-electron` 的 build 阶段)
+3. 启动 → `log.transports` 为 `undefined` → `log.transports.file.level = "info"` 抛错
+
+**定位过程**:
+1. **先看栈顶**:错在 `initMainLogger` 的**第一行业务语句**,而 `log` 本身不为空
+   ⇒ 不是"没导入",是"导进来的东西不对"。
+2. **抓免费线索**:electron-log 自己打了
+   `electron-log/renderer is loaded in the main process`。
+   一个库能说出这句话,说明它**知道自己的哪份实现被装进来了** —— 那就顺着这条走。
+3. **查依赖自己怎么声明**:`electron-log@5.4.4/package.json` 的 `exports`:
+   ```json
+   ".": {
+     "types":   "./src/index.d.ts",
+     "browser": "./src/renderer/index.js",
+     "default": "./src/index.js"
+   }
+   ```
+4. **查打包器怎么选条件**:Vite/Rollup 默认的 `resolve.conditions` 里**带有 `browser`**。
+   于是为 Main 进程打包时,`.` 这个入口优先命中了 `browser` 条件 ⇒ 打进的是
+   `src/renderer/index.js`。那份实现里 `transports` 本来就只在浏览器侧赋值。
+
+**根本原因**:
+> **条件导出是一套「按消费者环境做分发」的机制,而 Vite 的默认条件集合是按"给浏览器打包"配的。**
+> Renderer 用它是对的;Main / Preload 不是浏览器,用同一套条件就会**静默装错实现**。
+> 更麻烦的地方在于:这种错**不会在编译期报** —— 类型来自 `types` 字段(两份共用),
+> 所以 `tsc` 全绿,直到运行到第一次真正使用才炸。
+
+**修复方案**:
+> 三处导入改成显式子路径(各带一句注释指向本条):
+> ```ts
+> import log from "electron-log/main"   // 不用 "electron-log":见 Bug-009
+> ```
+> 涉及 `electron/main.ts`、`electron/logger.ts`、`electron/updater.ts`。
+
+**为什么这个修复有效**:
+> 显式子路径直接命中 `exports` 里的 `"./main"` 键,**跳过了 `"."` 的条件选择**。
+> 也就是说:不再让打包器替我们回答"这个包该给我哪一份",而是我们自己说清楚。
+> 顺带把库内部那条「猜我在哪个进程」的分支也绕开了。
+
+**如何避免再次出现**:
+1. **同一包对 main / renderer 有两份实现时,一律用显式子路径**(`pkg/main`、`pkg/renderer`),
+   不要依赖打包器的默认条件。
+2. **引入第三方库前先读它的 `exports` 字段** —— 那里写着它对"环境"的全部假设。
+3. 打包非浏览器目标时,主动核对 `resolve.conditions`;
+   更彻底的做法是给 main / preload 单独配置 `resolve.conditions: []`(只留 `node`)。
+4. **"这段代码以前验证过"不是它不会坏的理由** —— 依赖或被依赖方的元数据变了,它就会坏。
+
+**学习价值**:
+- **条件导出是双向的坑**:它既能帮你在对的环节选对实现,也能在对的环节选错实现
+- **库的启动警告是免费线索**:它自报家门的那句话,往往就是根因的方向
+- **类型正确 ≠ 运行时正确**:`types` 字段选对了,不代表 `default/browser` 也选对了
+- 报错在 `logger.ts`,根因在 `package.json` 的 `exports` —— **错误的位置不等于错误的来源**
+
+---
+
+### Bug-010: Electron 装成「空壳」+ 无锁文件导致整条工具链漂移
+
+**日期**:2026-10-19
+**类型**:环境 / 依赖管理 / 二进制资产 / 可复现性
+
+**现象**:
+> `pnpm dev` 起不来,报两层完全不同的错:
+> ```
+> Error: Electron failed to install correctly, please delete node_modules/electron and try installing again
+> ```
+> ```
+> TypeError [ERR_INVALID_ARG_TYPE]: The "file" argument must be of type string.
+>     Received an instance of Object
+>     at normalizeSpawnArguments (node:child_process:568:3)
+>     at startup (...\vite-plugin-electron\dist\index.js:206:25)
+> ```
+> 同时**之前能编过的代码编不过了**:
+> `src/tools/Base64Tool.tsx(85,47): error TS2315: Type 'Uint8Array' is not generic`
+
+**定位过程(这题的难点是三个问题挤在一个症状里)**:
+1. **先分清"报错说的是谁"**:`require("electron")` 报的是**装没装好**;
+   `vite-plugin-electron` 的 `spawn` 报的是**拿到的东西不是路径**。
+   两者是同一个原因的上下游,不是两个 Bug。
+2. **查二进制而不是查目录**:`node_modules\electron\` 目录在,但
+   - `path.txt` **不存在**
+   - `dist\` 里只有 **16 个文件**(完整是 **73 个**),**连 `electron.exe` 都没有**
+   ⇒ "看起来装了,其实是空壳"。
+3. **对照同 store 里的其它副本**:`electron@31.0.0` 有 41 个文件(完整)、
+   `electron@31.7.7_supports-color@7.2.0` 有 73 个(完整)
+   ⇒ 只是**我们这一份的解压中断了**,不是网络或镜像整体坏了。
+4. **查为什么会装到别的版本**:`pnpm-workspace.yaml` 里 `lockfile: false`
+   ⇒ 没有 `pnpm-lock.yaml` ⇒ 每次 install 重新解析。
+   这次装进去的是 `vite 5.0.0 / electron 31.0.0 / typescript 5.3.3`
+   (上一轮是 `5.4.21 / 31.7.7 / 5.9.x`)。
+5. **TS 2315 就是漂移的连带后果**:`Uint8Array<ArrayBuffer>` 这个泛型是 TS 5.7 才有的,
+   6-3 修 `Base64Tool` 时用的正是它;降级到 5.3.3 之后它变成了语法错误。
+
+**根本原因(三层)**:
+> **第一层**:Electron 的 npm 包**只是一个下载器**。真正的二进制
+> (`electron.exe` / `*.dll` / `*.pak` / `icudtl.dat`)是在 `postinstall` 里下载并解压的,
+> **这个动作不是原子的** —— 中断、权限、镜像抖动,任何一处出问题,
+> 就留下一个"目录存在、内容残缺"的 `node_modules/electron`。
+>
+> **第二层**:`require("electron")` 的返回值**只有两种**:dist 路径字符串,或者抛错。
+> 一旦二进制不全,它抛的错会被上一层(插件)当成"参数类型不对"继续往外抛,
+> **报出来的错和真因完全无关**。
+>
+> **第三层(放大器)**:`lockfile: false` 让每次 install 都可能换一套版本组合。
+> 换版本 → 触发重新解压 → 撞上中断 → 空壳。
+> 于是"版本漂移"和"二进制残缺"这两件事**互相喂养**。
+
+**修复方案**:
+1. 删掉残缺的 `node_modules\electron\dist` 与 `path.txt`
+2. 用镜像重跑下载器,让二进制重新完整落盘:
+   ```powershell
+   $env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
+   node node_modules\electron\install.js
+   ```
+3. 把工具链显式装回验证过的组合(精确版本,不带 `^`):
+   ```powershell
+   pnpm add -D electron@31.7.7 vite@5.4.21 typescript@5.9.3
+   ```
+4. 复查:`dist\` 73 个文件、`electron.exe` 在、`path.txt` 在、
+   `tsc -p tsconfig.node.json --noEmit` 与 `tsc -p tsconfig.json --noEmit` 均 exit 0
+
+**为什么这个修复有效**:
+> `install.js` 会先读 `dist/version` 判断"装没装好";dist 残缺时它读不到,于是报
+> "failed to install correctly" 而**不会重下** —— 所以这个错必须靠**手动清掉残缺 + 重跑下载器**才能解开,
+> 单纯再 `pnpm install` 一次会命中同一条短路。
+
+**一处推断被自己的实验推翻(记下来)**:
+> 我最初的解释是"pnpm 无锁文件时会解析到范围下限"。**这是错的。**
+> 在干净目录里做对照实验(`lockfile: false` + `"vite": "^5.0.0"` + `"electron": "^31.0.0"`):
+> 解析结果是 **`vite 5.4.21` / `electron 31.7.7`**,即 **pnpm 默认选范围内最高版本**。
+> ⇒ 版本落到下限,原因是**当时 `node_modules` 处于残缺/半装状态下的 reconcile**,
+> 不是 resolution-mode。**"我观察到它降级了"和"我知道它为什么降级"是两件事。**
+
+**如何避免再次出现**:
+1. **`lockfile: false` 是主动选择(为了改小版本后重装能生效),但必须配「关键工具链版本写死」**:
+   `vite` / `electron` / `typescript` 用精确版本;其它依赖可以用 `^`。
+   这样既保留"重装拿新版本"的便利,又不会让编译器自己换掉。
+2. **判断 Electron 装没装好,别看目录,看三样东西**:
+   `dist\electron.exe`、`dist\version`、`path.txt`。
+3. 遇到 `require("electron")` 的错,先问一句:**是"路径没拿到"还是"二进制不存在"**。
+4. 依赖变动之后,**第一件事是重跑两个 tsconfig 的全量检查**,而不是继续改业务代码。
+
+**学习价值**:
+- **前端包是"代码",Electron 包是"代码 + 几十 MB 二进制"**,两者的失败形态完全不同
+- **报错的位置不是错误的来源**:真因在安装,报错在插件的 `spawn`
+- **"无锁文件"换来的方便,代价是可复现性** —— 这个取舍要显式做、写进 decisions,而不是默认
+- **一次依赖漂移能同时打断编译和运行** —— 影响面比想象的大
+- **"观察到" ≠ "解释了"**:机制没验证过就写进结论,迟早会被自己的实验打脸
+
+---
+
+### 阶段 6-4 验证记录(2026-10-19)
+
+**自动更新的初始化:实测通过**(`logs/main.log` 真实内容):
+
+```
+[2026-10-19 11:58:07.294] [info]  [main] app starting (isDev=true, v0.1.0)
+[2026-10-19 11:58:07.720] [warn]  [updater] 未打包运行：已设 forceDevUpdateConfig = true，将读取 dev-app-update.yml 而不是 resources/app-update.yml
+[2026-10-19 11:58:07.723] [info]  [updater] 初始化完成 currentVersion=0.1.0 autoDownload=false autoInstallOnAppQuit=true allowDowngrade=false
+```
+
+三个策略值全部按设计生效:
+- `autoDownload=false` —— 不自动下载(常驻工具不能偷占带宽)
+- `autoInstallOnAppQuit=true` —— 退出时安装(不打断正在使用的人)
+- `allowDowngrade=false` —— 拒绝降级(防"用旧版本回退绕过新版本修复")
+
+**尚未完成**:真实的「发现新版本 → 下载 → 退出时安装」链路,需要一个本地更新源
+(`http://127.0.0.1:8080/updates` )配合两个版本号,见阶段 6-4 的实测步骤。
+
+---
+
+## 易错点(不是 Bug,但会浪费你半天)
+
+### E-001: 第三方库的错误提示会把你带偏
+
+**场景**:本地更新源目录配错了,客户端拿到 404。electron-updater 报:
+
+```
+Cannot find channel "latest.yml" update info
+Please double check that your authentication token is correct.
+Due to security reasons, actual status maybe not reported, but 404.
+```
+
+**为什么这句是误导**:我们用 `generic` provider,**根本没有 authentication token**。那句提示是 electron-updater 从 GitHub provider 继承下来的**通用文案**。照着它去查 token,方向从一开始就是错的。
+
+**正确做法**:
+1. **先看状态码和完整 URL**。日志里 `http://127.0.0.1:8080/updates/latest.yml?noCache=...` → 404,已经说明一切
+2. 再确认**服务端根目录**到底指向哪 —— 本例的真实原因是:启动服务时忘了传目录,`process.argv[2] ?? "release"` 回退成了「当前工作目录/release」,一个恰好存在、但里面没有 `latest.yml` 的旧构建目录
+3. 最后才去怀疑库的行为
+
+**通用规律**:第三方库的错误文案常常是**跨场景复用的**,它描述的是「最常见的那种失败」,不一定是你遇到的那种。**信状态码,不信措辞。**
+
+### E-002: 服务"看起来正常"是最难查的状态
+
+同一个问题的教训:**允许配置错,但不允许配置错了不吭声。**
+
+一个静态文件服务,在没有 `latest.yml` 的目录上跑起来,表现是:端口在听、HTTP 200/404 有响应、进程不报错 —— 一切"正常",但客户端稳定失败。
+
+修法是把检查前移到**启动的第一秒**:项目里的 `scripts/dev-update-server.mjs` 现在会在启动时自检 `latest.yml` 是否存在、`latest.yml` 里提到的文件名是否真的在目录里,不满足就立刻打印 ⚠ 并说明当前根目录。这与 Bug-008 是同一条原则。

@@ -29,7 +29,13 @@ import { TOOL_MANIFEST, getToolsUsingPermission } from "../shared/tool-manifest"
 // initMainLogger 内部会调用 crashReporter.start(),必须在 app.whenReady() 之前调用,
 // 因为 crashReporter 需要在 Chromium 初始化最早期注册才能捕获 crash。
 import { initMainLogger } from "./logger";
-import log from "electron-log";
+// ⚠ 必须写 `electron-log/main`,不能写 `electron-log`:见 Bug-009。
+// Vite 默认 resolve.conditions 含 "browser",会把 electron-log 的
+// browser 条件(渲染进程那份)解析进 Main 进程的 bundle。
+import log from "electron-log/main";
+
+// 阶段 6-4:自动更新
+import { checkForUpdatesNow, initAutoUpdater } from "./updater";
 
 // 初始化日志 —— 必须在 app ready 之前(crashReporter.start 早期注册)
 initMainLogger();
@@ -614,6 +620,22 @@ function createTray() {
       label: "显示主窗口",
       click: () => showWindow(),
     },
+    {
+      // 阶段 6-4:自动更新的手动入口
+      //
+      // 为什么放托盘菜单,而不是主窗口里加个按钮?
+      //   更新是「应用级」行为,不属于任何工具。阶段 5 的权限模型是围绕工具设计的,
+      //   而更新不属于任何工具 —— 它属于应用本身,所以入口在应用层(Main 的托盘)。
+      //   附带好处:整条更新逻辑不需要新增 IPC 通道,也就没有新的攻击面。
+      label: "检查更新",
+      click: async () => {
+        const msg = await checkForUpdatesNow();
+        // 非模态反馈:托盘应用不该弹模态框抢焦点(用户可能正在用别的软件)。
+        // 这里先用 tooltip 让结果可感知;真实产品会同时发系统通知。
+        log.info(`[main] 检查更新结果:${msg}`);
+        tray?.setToolTip(`Electron Toolbox — ${msg}`);
+      },
+    },
     { type: "separator" },
     {
       label: "退出",
@@ -654,6 +676,10 @@ app.whenReady().then(() => {
 
   createWindow();
   createTray();
+
+  // 阶段 6-4:自动更新必须在 app ready 之后初始化
+  // 它要读 app.getVersion()、app.isPackaged 等,ready 之前不保证可用。
+  initAutoUpdater();
 
   // macOS 特性:点击 dock 图标时,如果窗口都关了,重新创建一个
   // 这是 macOS 应用约定俗成的行为,Windows/Linux 不需要

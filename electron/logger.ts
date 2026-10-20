@@ -44,7 +44,11 @@
 //   **它失败了,会不会告诉我?** 一个把失败咽下去的库,能把人的排查方向带偏几小时。
 // ─────────────────────────────────────────────────────────────────────────
 
-import log from "electron-log";
+// ⚠ 必须写 `electron-log/main`,不能写 `electron-log`:见 Bug-009。
+// electron-log@5.4.4 的 exports 里 "." 同时有 "browser" 和 "default" 两个条件,
+// Vite 默认 resolve.conditions 含 "browser" → Main 的 bundle 拿到渲染进程那份,
+// log.transports 为 undefined → initMainLogger 第一行就抛 TypeError。
+import log from "electron-log/main";
 import { crashReporter } from "electron";
 import { join } from "node:path";
 import {

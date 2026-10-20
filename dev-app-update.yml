@@ -1,0 +1,16 @@
+# dev-app-update.yml —— 仅开发模式使用
+#
+# 为什么需要这个文件？
+#   electron-updater 通过 `app-update.yml` 知道「去哪儿问版本」。
+#   那个文件是 electron-builder 在【打包时】根据 package.json 的 build.publish
+#   生成、并放进 resources/ 的 —— dev 模式下根本没有 resources/ 这一层。
+#
+#   官方给的出口是 autoUpdater.forceDevUpdateConfig = true，
+#   打开后它会改读 `path.join(app.getAppPath(), "dev-app-update.yml")`。
+#   （见 node_modules/electron-updater/out/ElectronAppAdapter.js:23）
+#
+# 注意：这里的 url 必须和 package.json 的 build.publish 保持一致，
+#       否则你会遇到「dev 能测、打包后失效」这种最难查的一类偏差。
+
+provider: generic
+url: http://127.0.0.1:8080/updates
