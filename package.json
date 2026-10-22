@@ -1,6 +1,6 @@
 {
   "name": "electron-toolbox-learning",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Electron Desktop Toolbox - learning project",
   "main": "dist-electron/main.js",

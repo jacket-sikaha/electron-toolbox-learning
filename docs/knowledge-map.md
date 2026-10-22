@@ -72,7 +72,8 @@
 - [x] ✅ 依赖可复现性:`lockfile: false` 的取舍(换「改小版本后重装能生效」,代价是可复现性)+ **关键工具链(vite / electron / typescript)版本写死** —— Bug-010 实战
 - [x] ✅ Electron「空壳安装」的识别 —— 判断装好没,**看 `dist\electron.exe` + `dist\version` + `path.txt` 三样,不看目录在不在**;`require("electron")` 报错先分「路径没拿到」还是「二进制不存在」 —— Bug-010 实战
 - [ ] 🔴 ASAR 打包机制 —— 阶段 6
-- [x] ✅ 自动更新(electron-updater)—— 阶段 6-4 实现完成:事件驱动 + 三策略(`autoDownload=false` / `autoInstallOnAppQuit=true` / `allowDowngrade=false`)+ `generic` provider 生成 `app-update.yml` + dev 用 `dev-app-update.yml` + `forceDevUpdateConfig`;**本地更新源的端到端实测待做**
+- [x] ✅ 自动更新(electron-updater)—— 阶段 6-4 **全链路实测通过**:事件驱动 + 三策略(`autoDownload=false` / `autoInstallOnAppQuit=true` / `allowDowngrade=false`)+ `generic` provider 生成 `app-update.yml` + dev 用 `dev-app-update.yml` + `forceDevUpdateConfig`;真实局面 **0.1.0 → 检查 → 下载 → A 通知 → D 托盘标记 → B 退前询问 → 安装器 → 0.1.2 自动拉起 → C 已更新告知** 全通(Bug-012/013/014 实战)
+- [x] ✅ 跨版本自检(痕迹文件):「退出后安装」的执行者不是应用自己,重启后只能看版本号变没变 —— 而「没变」有两种现实(用户取消 / 安装器失败)。用 `userData` 里的**意图痕迹**把「没发生」和「发生了但失败」拆开;实测 NSIS 升级安装不动 `userData` —— ADR-010
 - [ ] 🔴 代码签名与完整性(**sha512 完整性 ≠ 代码签名来源** / latest.yml 自己被篡改怎么办 / macOS Notarization)—— 用户决定暂缓
 
 ---
@@ -86,7 +87,7 @@
 | 3 | 生命周期与系统工具(Tray/Menu) | ✅ 完成 | 95%(globalShortcut / 应用菜单待补) |
 | 4 | 大文件与异步(Worker Threads) | ✅ 完成 | 100%(含 Bug-003 实验) |
 | 5 | 插件化扩展架构 | ✅ 完成 | 100%(契约层 + 注册表 + ctx 注入 + 权限裁剪 + Bug-004 实验) |
-| 6 | 工程化与发布 | 🔄 进行中 | 85%(6-1 打包 ✅ / 6-2 electron-builder ✅ 签名按决定暂缓 / 6-3 日志 + crashReporter ✅ 4/4 验收 / 6-4 自动更新 🔄 **检查链路已通**,下载 + 安装待补 / 6-5 测试 ⏳ / 复盘 ⏳) |
+| 6 | 工程化与发布 | 🔄 进行中 | 95%(6-1 打包 ✅ / 6-2 electron-builder ✅ 签名按决定暂缓 / 6-3 日志 + crashReporter ✅ 4/4 验收 / 6-4 自动更新 ✅ **全链路实测通过**(0.1.0→0.1.2,A/B/C/D 四告知点全命中) / 6-5 测试 ⏳ / 复盘 ⏳) |
 | 7 | 性能与架构演进 | ⏳ 待开始 | 0% |
 
 ## 薄弱点记录
@@ -124,6 +125,10 @@
 - **【待检验 · Bug-009】类型正确 ≠ 运行时正确**:条件导出里 `types` 和 `default`/`browser` 是**分开选的**。`tsc` 全绿只说明类型对上了,不代表运行时加载的是同一份实现 —— 所以这类错**一定在运行到第一次真正使用才炸**
 - **【待检验 · Bug-010】「装好了」要靠三样东西证明**:Electron 的 npm 包只是下载器,真二进制在 postinstall 里下。判断装好没 = `dist\electron.exe` + `dist\version` + `path.txt`,**不看目录在不在**;`require("electron")` 报错先分「路径没拿到」还是「二进制不存在」
 - **【待检验 · Bug-010】观察 ≠ 解释**:我曾把「版本降到范围下限」解释成「pnpm 无锁文件时解析最低版本」,对照实验直接推翻(干净目录下 `^5.0.0` 解析出 5.4.21)。真因是残缺 `node_modules` 的 reconcile。**机制没验证过就不能写进结论**
+- **【待检验 · Bug-011】`statSync` 成功 ≠ 这个路径是文件**:它对**目录**也返回 stat 对象。所以「先 stat 判存在,再 `createReadStream`」这个常见写法漏掉了一格 —— 目录会一路放行到 `createReadStream`,抛 `EISDIR`。而 `ReadStream` 的错误是**异步 `'error'` 事件**,不监听就会被 `EventEmitter` 当成未捕获异常 → **整个服务进程消失**。判断口径:**同步 API 返回成功的语义往往比你以为的窄**(`existsSync` ≠ 可读、`writeFileSync` 不抛 ≠ 写进去了)
+- **【待检验 · Bug-012】测试局面要**先验证成立,再验证行为**:**「更新」的定义是 `source.version > client.version`,需要**两个不同的值**。我在同一步里把源和客户端都设成 0.1.1 → 差值消失 → 日志报 `not available`,却被误读成「功能坏了」。任何比较型功能(版本/时间/序号/计数)测试前先把两侧值显式列出来确认不相等且方向正确
+- **【待检验 · Bug-013】一个状态位承载两种现实 = 误判的温床**:版本号「没变」既可能是**用户取消**(没发生),也可能是**安装器失败**(发生了但失败)。两者共用同一个表示,于是「用户自己取消」被报成了「上次安装没生效」。这与 Bug-008 是同一类错的两个方向:Bug-008 是**失败了装没失败**,Bug-013 是**没发生报成失败**。口径:**允许失败,但不允许误判** —— 凡是跨启动的状态,列一张「每种用户选择对应哪个状态」的表,包括「什么都不做」那一格
+- **【待检验 · Bug-014】BOM 是 Windows 工具链里最爱无声捣乱的东西**:`JSON.parse` 不接受 BOM(JSON 规范只允许无 BOM 的 UTF-8)。Windows 上 `Set-Content -Encoding utf8` 等工具**默认带 BOM**,于是文件人眼看是合法 JSON、机器读直接 `Unexpected token '\uFEFF'`。读取侧**先把 BOM 当元数据处理掉**再 parse;写入侧统一 `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))`。同一个坑可以**同时出现在被测代码和测试工具里**(这次两边都踩了)。另:**「坏文件」是很重的判断**,下之前先穷尽可恢复的修复(剥 BOM / 去空白 / 容忍尾逗号)
 
 ## 已巩固(曾为薄弱点,已通过复述检查)
 
@@ -154,3 +159,8 @@
 - Bug-008:electron-log 写 main.log 被系统拒绝(EPERM)之后**完全静默** —— 不建文件、不打日志、不抛异常。两层根因:①运行环境只允许写工作区,`%APPDATA%` 只读;②electron-log 5.x 的 `File.writeLine` 只 `emit("error")`,而那个 error 事件没有任何消费者 → 重写 logger.ts:可写性预检 + 回退链(userData→temp→workspace)+ 显式 `resolvePathFn` + 补上错误出口 → 见 `bug-lab.md`
 - Bug-009:electron-log 在 Main 进程里被装进了**渲染进程那份实现**(`log.transports` 为 `undefined` → `TypeError: Cannot set properties of undefined`)。根因:`electron-log@5.4.4` 的 `exports` 里 `"."` 同时挂 `browser` 和 `default`,而 Vite 默认 `resolve.conditions` 含 `browser` → 为 Main 打包时命中 `browser` → 打进 `src/renderer/index.js`;`tsc` 全绿因为 `types` 是另一条分支。修复:三处改 `import log from "electron-log/main"` → 见 `bug-lab.md`
 - Bug-010:Electron 装成「空壳」+ 无锁文件导致整条工具链漂移。`electron@31.7.7` 的 `dist\` 只有 16/73 个文件、无 `electron.exe`、无 `path.txt` → `require("electron")` 抛 "failed to install correctly" → 被 `vite-plugin-electron` 的 `spawn` 报成 `ERR_INVALID_ARG_TYPE`(报错位置≠错误来源);连带 `vite 5.0.0 / electron 31.0.0 / typescript 5.3.3` 降级,TS 5.3 不认识 `Uint8Array<ArrayBuffer>` → `Base64Tool.tsx(85,47) TS2315`。修复:清残缺 + `ELECTRON_MIRROR` 重跑 `install.js`(73 文件)+ 精确版本装回 `electron@31.7.7 / vite@5.4.21 / typescript@5.9.3` → 见 `bug-lab.md`
+- Bug-011:本地更新源在「请求目录」时**整个进程崩掉**。`statSync(目录)` 成功放行 → `createReadStream(目录)` 抛 `EISDIR` → `ReadStream` 的 `'error'` 没人监听 → `EventEmitter` 默认抛错 → 进程退出。修法:`st.isDirectory()` 显式判 + 监听 `stream.on("error")` → 见 `bug-lab.md`
+- Bug-012:造「有新版本」的局面时把源和客户端设成同一个版本号(都 0.1.1)→ `not available`,白测一轮。根因:「更新」需要 `source > client` 两个不同的值,我在同一步里消掉了差值。修法:先写清三元组「客户端版本 / 源版本 / 期望结果」→ 见 `bug-lab.md`
+- Bug-013:「这次不装」后痕迹没作废 → 下次启动误报「上次安装没生效」。根因:痕迹只该表示「已委托安装」,而「用户取消」这条路径没回滚它 → 同一个状态位承载两种现实。修法:`cancelInstallPending()` **先作废痕迹再关自动安装** → 见 `bug-lab.md`
+- Bug-014:痕迹文件带 BOM 就 `JSON.parse` 失败,并被当作坏文件改名丢弃 → C 静默失效。修法:读取时先剥 BOM;写入侧统一无 BOM UTF-8。⚠ 同一坑在**自己的构建脚本**上复发一次:`Set-Content -Encoding utf8` 给 `package.json` 加 BOM → electron-builder 崩 `"name"... is not valid JSON` → 见 `bug-lab.md`
+- ADR-010:跨版本自检用**痕迹文件**而不是无条件报喜 → 见 `decisions.md`

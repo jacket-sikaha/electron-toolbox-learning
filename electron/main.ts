@@ -35,10 +35,25 @@ import { initMainLogger } from "./logger";
 import log from "electron-log/main";
 
 // 阶段 6-4:自动更新
-import { checkForUpdatesNow, initAutoUpdater } from "./updater";
+import {
+  cancelInstallPending,
+  checkForUpdatesNow,
+  downloadUpdateNow,
+  getUpdateState,
+  initAutoUpdater,
+  notifyUpdateAppliedIfAny,
+  onUpdateStateChange,
+  quitAndInstallNow,
+  setAutoInstallOnQuit,
+} from "./updater";
 
 // 初始化日志 —— 必须在 app ready 之前(crashReporter.start 早期注册)
 initMainLogger();
+
+// 阶段 6-4:Windows 上系统通知(Notification)必须有 AppUserModelID 才能正常弹出,
+// 而且它应当尽早设置。值必须与 package.json 的 build.appId 保持一致 ——
+// 两处不一致时,通知的归属应用会错位(表现为通知不弹,或归到别的应用名下)。
+app.setAppUserModelId("com.electron.toolbox");
 
 // 关键设计 1:__dirname 在 CommonJS 环境下可直接用
 // electron/main.ts 会被 tsc 编译成 CommonJS 输出到 dist-electron/,
@@ -615,31 +630,101 @@ function createTray() {
   tray.setToolTip("Electron Toolbox");
 
   // 关键设计 7.3:托盘菜单 —— 注意「退出」这一项的写法
-  const contextMenu = Menu.buildFromTemplate([
+  //
+  // 阶段 6-4:菜单不再是一次性构建的静态表,而是「更新状态的投影」。
+  //   每次状态变化 → rebuildTrayMenu() → 菜单项的可点状态和文字跟着变。
+  rebuildTrayMenu();
+  onUpdateStateChange(rebuildTrayMenu);
+
+  // 关键设计 7.4:单击托盘图标恢复窗口
+  //
+  // ⚠️ 平台差异:这个事件在 macOS 上是失效的(或者行为不同)。
+  //    macOS 的约定是:单击托盘图标弹出菜单,所以那里只能靠菜单项恢复窗口。
+  //    这也是为什么上面的菜单里有「显示主窗口」—— 它是跨平台都能用的入口。
+  tray.on("click", () => {
+    showWindow();
+  });
+}
+
+// ==========================================================================
+// 阶段 6-4:托盘菜单 = 更新状态的投影
+// --------------------------------------------------------------------------
+// 为什么是「重建」而不是「拿到菜单项改 label / enabled」?
+//   Menu.buildFromTemplate() 返回的 Menu 是**快照**:创建之后再改它的项,
+//   不会反映到已经挂到托盘上的那个菜单。所以状态驱动的菜单只有一条路 ——
+//   重新 build、重新 set。代价极小(模板就几项),换来「菜单永远显示真实状态」。
+//
+// 三个入口各自对应状态机的一个位置:
+//   检查更新   → checking / downloading 期间不可点
+//   下载更新   → 只有 available 可点(autoDownload=false,必须用户发起)
+//   重启并安装 → 只有 ready 可点
+// 界面上灰掉一项,比「点了没反应」清楚得多 —— 约束应该被看见,而不是被试探。
+// ==========================================================================
+function buildTrayMenu(): Menu {
+  const { state, message, version } = getUpdateState();
+
+  const checkLabel = state === "checking" ? "正在检查更新…" : "检查更新";
+  const downloadLabel =
+    state === "downloading"
+      ? "正在下载更新…"
+      : state === "available"
+        ? `下载更新(${version})`
+        : "下载更新";
+  const installLabel =
+    state === "ready" ? `重启并安装(${version})` : "重启并安装";
+
+  return Menu.buildFromTemplate([
     {
       label: "显示主窗口",
       click: () => showWindow(),
     },
+    { type: "separator" },
     {
-      // 阶段 6-4:自动更新的手动入口
-      //
-      // 为什么放托盘菜单,而不是主窗口里加个按钮?
-      //   更新是「应用级」行为,不属于任何工具。阶段 5 的权限模型是围绕工具设计的,
-      //   而更新不属于任何工具 —— 它属于应用本身,所以入口在应用层(Main 的托盘)。
-      //   附带好处:整条更新逻辑不需要新增 IPC 通道,也就没有新的攻击面。
-      label: "检查更新",
-      click: async () => {
-        const msg = await checkForUpdatesNow();
-        // 非模态反馈:托盘应用不该弹模态框抢焦点(用户可能正在用别的软件)。
-        // 这里先用 tooltip 让结果可感知;真实产品会同时发系统通知。
-        log.info(`[main] 检查更新结果:${msg}`);
-        tray?.setToolTip(`Electron Toolbox — ${msg}`);
+      // 只读状态行:让用户随时知道更新走到哪一步了
+      label: `更新状态:${message}`,
+      enabled: false,
+    },
+    {
+      label: checkLabel,
+      enabled: state !== "checking" && state !== "downloading",
+      click: () => {
+        // 结果由状态机 + 系统通知反馈,这里只记日志
+        void checkForUpdatesNow();
+      },
+    },
+    {
+      label: downloadLabel,
+      enabled: state === "available",
+      click: () => {
+        void downloadUpdateNow();
+      },
+    },
+    {
+      label: installLabel,
+      enabled: state === "ready",
+      click: () => {
+        // ★ 先设 isQuitting,再让 updater 退出安装
+        //   顺序反了就会被窗口 close 的拦截逻辑挡住(Bug-002 的僵尸态)。
+        isQuitting = true;
+        quitAndInstallNow();
       },
     },
     { type: "separator" },
     {
       label: "退出",
       click: () => {
+        // ★ B 项:有更新待安装时,退出前先问一句。
+        //
+        // 为什么不写在 app.on("before-quit") 里?
+        //   before-quit 是同步事件,「先问再退」只能 preventDefault + 异步回调里重新发起退出,
+        //   而它同时覆盖系统关机/注销 —— 那种场景下弹窗既来不及也不礼貌,只会拖住关机。
+        //   Electron 的 dialog 在关机流程里还可能弹不出来,最后变成「关不掉机」。
+        //   所以:我们自己掌握的那个退出入口(托盘菜单)负责询问;
+        //   拦不住的系统级退出,由 C 项(下次启动告知「已更新到 X」)兜底。
+        if (getUpdateState().state === "ready") {
+          void askBeforeQuitWithPendingUpdate();
+          return;
+        }
         // ★ 关键:先设 isQuitting = true,再调 app.quit()
         //
         // 顺序不能反。app.quit() 是「同步发起退出流程」,它会立刻触发窗口的
@@ -653,16 +738,73 @@ function createTray() {
       },
     },
   ]);
-  tray.setContextMenu(contextMenu);
+}
 
-  // 关键设计 7.4:单击托盘图标恢复窗口
-  //
-  // ⚠️ 平台差异:这个事件在 macOS 上是失效的(或者行为不同)。
-  //    macOS 的约定是:单击托盘图标弹出菜单,所以那里只能靠菜单项恢复窗口。
-  //    这也是为什么上面的菜单里有「显示主窗口」—— 它是跨平台都能用的入口。
-  tray.on("click", () => {
-    showWindow();
+/**
+ * 有更新待安装时,退出前问一句「现在装,还是这次不装」。
+ *
+ * 这一项是 Q4 里「替用户做决定」的真正补救 —— 因为 autoInstallOnAppQuit = true
+ * 把「退出」和「安装」绑在了一起,而用户点「退出」时想的是前者。
+ * 只在 ready 状态才会被调用,平时用户看到的仍然是「点一下就退出」。
+ */
+async function askBeforeQuitWithPendingUpdate(): Promise<void> {
+  const { version } = getUpdateState();
+
+  const { response } = await dialog.showMessageBox({
+    type: "question",
+    noLink: true,
+    title: "更新已就绪",
+    message: `新版本 ${version} 已下载完成。`,
+    detail:
+      "按当前设置，退出应用后安装器会自动运行（静默、无界面），装完不会自动打开应用。\n\n" +
+      "· 现在安装并重启：立刻装上，并直接打开新版本\n" +
+      "· 仅退出（这次不装）：退出但不安装，下次启动会重新检查\n" +
+      "· 取消：什么都不做，继续用当前版本",
+    buttons: ["现在安装并重启", "仅退出（这次不装）", "取消"],
+    defaultId: 0,
+    cancelId: 2,
   });
+
+  if (response === 0) {
+    log.info("[main] 用户在退出前选择「现在安装并重启」");
+    isQuitting = true;
+    quitAndInstallNow();
+    return;
+  }
+
+  if (response === 1) {
+    log.info("[main] 用户在退出前选择「仅退出,这次不装」");
+    // 顺序要紧:先把「我要装了」的痕迹作废,再关掉退出即装。
+    // 否则下次启动会因为「痕迹还在、版本没变」而误报「上次安装没生效」。
+    cancelInstallPending("用户在退出前选择仅退出");
+    setAutoInstallOnQuit(false);
+    isQuitting = true;
+    app.quit();
+    return;
+  }
+
+  log.info("[main] 用户在退出前选择「取消」,继续运行");
+}
+
+function rebuildTrayMenu(): void {
+  // tray 在 createTray() 之前是 undefined;状态变化可能早于托盘创建
+  tray?.setContextMenu(buildTrayMenu());
+
+  // ★ D 项:托盘 tooltip 上常驻一个更新标记。
+  //
+  // 为什么不只靠菜单文字?菜单要「点开」才看得见,而 tooltip 只需把鼠标悬上去。
+  // 对一个常驻托盘的工具来说,「有没有事情等我处理」应该在不发生任何交互的情况下可发现 ——
+  // 这也是为什么真正的生产应用会在图标上做角标,而不只是改菜单项。
+  const { state, version } = getUpdateState();
+  const pending =
+    state === "ready"
+      ? ` · ${version} 待安装`
+      : state === "available"
+        ? ` · ${version} 可更新`
+        : state === "downloading"
+          ? " · 正在下载更新"
+          : "";
+  tray?.setToolTip(`Electron Toolbox${pending}`);
 }
 
 // 关键设计 8:app.whenReady() —— 创建窗口的唯一正确时机
@@ -680,6 +822,13 @@ app.whenReady().then(() => {
   // 阶段 6-4:自动更新必须在 app ready 之后初始化
   // 它要读 app.getVersion()、app.isPackaged 等,ready 之前不保证可用。
   initAutoUpdater();
+
+  // ★ C 项:上一次退出时如果发生过「静默安装」,这一次启动就要让用户知道。
+  //   必须在 initAutoUpdater() 之后调用 —— 因为它要用 app.getVersion()
+  //   跟痕迹文件里记的版本号核对,确认到底装上了没有。
+  //   注意顺序上的细节:先 init 再消费,这样即使消费失败,
+  //   更新模块本身也已经处于可用状态,不会因为一条提示把整个更新链路带崩。
+  notifyUpdateAppliedIfAny();
 
   // macOS 特性:点击 dock 图标时,如果窗口都关了,重新创建一个
   // 这是 macOS 应用约定俗成的行为,Windows/Linux 不需要

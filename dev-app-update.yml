@@ -14,3 +14,18 @@
 
 provider: generic
 url: http://127.0.0.1:8080/updates
+
+# 为什么这里必须补上 updaterCacheDirName？
+#   抽查 D:\software\ElectronToolbox\resources\app-update.yml（打包时 electron-builder
+#   生成的那一份真文件）里有这一行：updaterCacheDirName: electron-toolbox-learning-updater
+#   而本文件最初漏了它，于是 electron-updater 走了回退分支：
+#       node_modules/electron-updater/out/AppUpdater.js:545  const dirName = (await this.configOnDisk.value).updaterCacheDirName;
+#       node_modules/electron-updater/out/AppUpdater.js:548  logger.error("updaterCacheDirName is not specified in app-update.yml ...")
+#       node_modules/electron-updater/out/AppUpdater.js:550  const cacheDir = path.join(this.app.baseCachePath, dirName || this.app.name);
+#   实测结果就是「dev 和打包后用的是两个不同目录」：
+#       dev   → C:\Users\...\AppData\Local\electron-toolbox-learning\pending\...
+#       生产  → C:\Users\...\AppData\Local\electron-toolbox-learning-updater\...
+#   这不只是难看，它会让「已经下好的包」在两边看不见，差分下载也会因为
+#   找不到本地旧安装包而静默退化成全量下载。
+#   所以这里显式写死成和打包产物一模一样的值 —— dev 要与生产同构，不要各自一套。
+updaterCacheDirName: electron-toolbox-learning-updater

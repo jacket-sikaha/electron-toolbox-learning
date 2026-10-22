@@ -15,7 +15,7 @@
 //   用 `npx serve` 之类也行,但本地不联网时这个零依赖脚本最稳。
 
 import { createServer } from "node:http";
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 
 const rootArg = process.argv[2] ?? "release";
@@ -54,31 +54,62 @@ const server = createServer((req, res) => {
     return;
   }
 
-  let size;
+  // ⚠ statSync 对【目录】也会成功 —— 必须显式判断。
+  //   否则下一步 createReadStream(目录) 会抛 EISDIR,而 ReadStream 的 'error'
+  //   事件如果没人监听,Node 会直接结束整个进程 —— 不是只失败这一个请求。
+  //   这就是典型的「把单个请求的错误升级成全局故障」。本脚本第一版正是这么死的:
+  //   一个 HEAD /updates/ 请求,就把正在给客户端提供安装包的服务打挂了。
+  let st = null;
   try {
-    size = statSync(file).size;
+    st = statSync(file);
   } catch {
-    console.log(`  [404] ${rel}`);
+    st = null; // 不存在
+  }
+
+  if (!st || st.isDirectory()) {
+    const why = st?.isDirectory() ? "(这是一个目录,不提供索引页)" : "";
+    console.log(`  [404] ${rel} ${why}`);
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     // 把「实际服务的根目录」写进响应体。
     // 否则客户端只看到一个光秃秃的 404,而 electron-updater 还会把它包装成
     // 「Please double check that your authentication token is correct」——
     // 我们用的是 generic provider,根本没有 token。那句提示是从 GitHub provider
     // 继承来的通用文案,纯属误导。
-    res.end(`not found: ${rel}\n实际服务的根目录: ${root}\n`);
+    res.end(
+      `not found: ${rel}\n${why ? why + "\n" : ""}实际服务的根目录: ${root}\n`,
+    );
     return;
   }
 
-  console.log(`  [200] ${rel}  (${size} bytes)`);
+  console.log(
+    `  [${req.method === "HEAD" ? "HEAD" : "200"}] ${rel}  (${st.size} bytes)`,
+  );
   res.writeHead(200, {
     "content-type": MIME[extname(file).toLowerCase()] ?? "application/octet-stream",
-    "content-length": size,
+    "content-length": st.size,
     // 明确告诉客户端不支持分段:generic provider 会据此退化成整包下载,
     // 而不是去发 Range 请求然后拿到一个 200 + 全量,把自己搞糊涂。
     "accept-ranges": "none",
     "cache-control": "no-store",
   });
-  createReadStream(file).pipe(res);
+
+  // HEAD 只回响应头 —— 也不该为了它去开一个文件流
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+
+  const stream = createReadStream(file);
+  // ★ 必须监听 'error':例如文件在 stat 之后被删掉 / 被占用。
+  //   不监听 = 未处理的 'error' 事件 = 进程直接退出。
+  stream.on("error", (e) => {
+    console.error(`  [500] ${rel} 读取失败: ${e.message}`);
+    if (!res.headersSent) {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+    }
+    res.end(`读取文件失败: ${e.message}\n`);
+  });
+  stream.pipe(res);
 });
 
 // ── 启动自检 ────────────────────────────────────────────────────────────────
