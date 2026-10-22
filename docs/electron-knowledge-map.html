@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Electron 知识点地图 · 官方文档校验版</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
+  --sel:#34d399; --rej:#f87171; --why:#60a5fa; --flip:#fbbf24; --note:#a78bfa; --eg:#fb923c;
+  --sec:#22d3ee; --dec:#93c5fd;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:radial-gradient(1200px 780px at 18% -12%,#1a2531,#0d1117 62%);
+  color:var(--fg); overflow:hidden;
+  font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+}
+#hud{
+  position:fixed; inset:0 0 auto 0; height:54px; z-index:30;
+  display:flex; align-items:center; gap:12px; padding:0 16px;
+  background:rgba(13,17,23,.88); backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--line); white-space:nowrap;
+}
+#hud .title{font-weight:700; font-size:14px; letter-spacing:.2px}
+#hud .sub{color:var(--dim); font-size:12px}
+#hud .grow{flex:1}
+#q{
+  width:230px; padding:6px 10px; border-radius:8px; border:1px solid var(--line);
+  background:#0f151c; color:var(--fg); font-size:12.5px; outline:none;
+}
+#q:focus{border-color:#3b82f6; box-shadow:0 0 0 3px #3b82f622}
+#q::placeholder{color:#5d6874}
+button{
+  padding:6px 10px; border-radius:8px; border:1px solid var(--line);
+  background:#161d26; color:var(--fg); font-size:12px; cursor:pointer; font-family:inherit;
+}
+button:hover{background:#1e2833; border-color:#465061}
+button:active{transform:translateY(1px)}
+.chip{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--dim)}
+.chip i{width:8px; height:8px; border-radius:2px; display:inline-block}
+#vp{
+  position:absolute; inset:54px 0 0 0; overflow:auto; padding:0;
+  background-image:linear-gradient(#ffffff06 1px,transparent 1px),linear-gradient(90deg,#ffffff06 1px,transparent 1px);
+  background-size:26px 26px;
+}
+#vp.grabbing{cursor:grabbing}
+#stage{position:relative}
+#canvas{position:absolute; left:0; top:0; transform-origin:0 0}
+#links{position:absolute; left:0; top:0; overflow:visible; pointer-events:none}
+.node{
+  position:absolute; width:max-content; max-width:318px; padding:7px 11px; border-radius:10px;
+  border:1px solid var(--line); background:var(--panel);
+  transition:opacity .16s ease, box-shadow .16s ease, border-color .16s ease;
+  word-break:break-word; overflow-wrap:break-word;
+}
+.node.has-kids{cursor:pointer}
+.node.has-kids:hover{border-color:#4b5563; box-shadow:0 2px 14px #0008}
+.node.hit{box-shadow:0 0 0 2px #3b82f6, 0 0 18px #3b82f655; border-color:#3b82f6}
+.node.dim{opacity:.22}
+.node.k-root{
+  font-size:17px; font-weight:700; padding:12px 16px; max-width:330px;
+  background:linear-gradient(135deg,#1f6feb33,#22d3ee1f); border-color:#22d3ee55;
+  box-shadow:0 0 30px #22d3ee22;
+}
+.node.k-sec{
+  font-weight:700; font-size:13.5px; color:#cdf3ff; background:#10242c;
+  border-color:#1c4a55; border-left:3px solid var(--sec); max-width:250px;
+}
+.node.k-dec{
+  font-weight:600; color:#eaf2fb; background:#1a2330; border-color:#3c4a5c;
+  border-left:3px solid var(--dec); max-width:300px;
+}
+.node.k-sel{border-left:3px solid var(--sel); color:#d6fbee; background:#0f2018; font-weight:600; max-width:130px}
+.node.k-rej{border-left:3px solid var(--rej); color:#ffe4e4; background:#211415; font-weight:600; max-width:130px}
+.node.k-why{border-left:3px solid var(--why); color:#e2edff; background:#131c2b; font-weight:600; max-width:130px}
+.node.k-flip{border-left:3px solid var(--flip); color:#fff5d9; background:#241d10; font-weight:600; max-width:150px}
+.node.k-note{border-left:3px solid var(--note); color:#eee8ff; background:#1b1830; font-weight:600; max-width:150px}
+.node.k-eg{border-left:3px solid var(--eg); color:#ffedd5; background:#241a10; font-weight:600; max-width:150px}
+.node.k-qa{border-left:3px solid var(--sec); font-weight:600; background:#10242c; max-width:290px}
+.node.k-p{
+  font-size:12px; line-height:1.5; padding:6px 10px; max-width:318px;
+  background:#11171e; color:#b8c4d0; border-color:#242c36;
+}
+.node.k-p.kids-none{}
+.node.collapsed::after{content:" ▸"; color:var(--dim); font-size:11px}
+#legend{
+  position:fixed; left:16px; bottom:12px; z-index:30; display:flex; gap:14px;
+  padding:7px 12px; border-radius:10px; background:rgba(13,17,23,.85);
+  border:1px solid var(--line); backdrop-filter:blur(8px);
+}
+#hint{
+  position:fixed; right:16px; bottom:12px; z-index:30; color:#5d6874; font-size:11px;
+  background:rgba(13,17,23,.85); padding:7px 12px; border-radius:10px; border:1px solid var(--line);
+}
+kbd{background:#1e2833; border:1px solid #3a4552; border-bottom-width:2px; border-radius:4px; padding:0 4px; font:11px ui-monospace,monospace; color:#c7d2dd}
+@media (max-width:900px){ #hud .sub, #hud .chip{display:none} #q{width:150px} }
+</style>
+</head>
+<body>
+<div id="hud">
+  <span class="title">Electron 知识点地图</span>
+  <span class="sub" id="stat">7 大主题 · 官方文档校验版</span>
+  <span class="grow"></span>
+  <input id="q" placeholder="搜索…（/ 聚焦，Esc 清空）" autocomplete="off">
+  <button id="b-expand">展开全部</button>
+  <button id="b-cells">收起细节</button>
+  <button id="b-dec">只看大纲</button>
+  <button id="b-fit">适应宽度</button>
+  <button id="b-out">−</button>
+  <button id="b-in">+</button>
+</div>
+
+<div id="vp"><div id="stage"><div id="canvas"><svg id="links" xmlns="http://www.w3.org/2000/svg"></svg></div></div></div>
+
+<div id="legend">
+  <span class="chip"><i style="background:var(--dec)"></i>主题</span>
+  <span class="chip"><i style="background:var(--why)"></i>要点</span>
+  <span class="chip"><i style="background:var(--note)"></i>坑 / 注意</span>
+  <span class="chip"><i style="background:var(--eg)"></i>例子</span>
+</div>
+<div id="hint"><kbd>/</kbd> 搜索 · <kbd>Esc</kbd> 清空 · <kbd>+</kbd><kbd>-</kbd> 缩放 · 空白处拖动平移 · 点节点折叠</div>
+
+<script>
+"use strict";
+
+/* ============ 数据：只覆盖阶段 1-5 ============ */
+const DATA = {
+  t: "Electron 知识点地图\n7 大主题 · 官方文档校验版", k: "root", c: [
+
+  { t: "① 进程模型", k: "sec", c: [
+    { t: "Main 主进程", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "全应用唯一，Node.js 环境，是所有其他进程的父进程", k: "p" },
+        { t: "管窗口创建、系统交互、进程间协调；UI 线程也在这里", k: "p" },
+        { t: "阻塞它 = 整个应用冻结（官方性能清单第一条红线）", k: "p" },
+        { t: "app 的 ready 事件触发前，大部分 API 不可用", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "Main 像公司总机 + 前台：所有窗口的电话都从这里转接，前台一倒，全公司失联", k: "p" } ] }
+    ]},
+    { t: "Renderer 渲染进程", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "每个窗口一个，Chromium 环境，负责页面渲染", k: "p" },
+        { t: "Electron 20 起默认 sandbox:true；nodeIntegration 默认 false → 默认碰不到 Node", k: "p" },
+        { t: "进程间内存不共享，要数据只能走 IPC", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "像商场里各自独立的店铺：自己装修（渲染）自己管，但进货出货（系统能力）都要经过物业（Main）", k: "p" } ] }
+    ]},
+    { t: "Preload 预加载脚本", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "在 Renderer 里运行但拥有特权，是 Renderer 与 Main 之间的桥", k: "p" },
+        { t: "contextIsolation 下 preload 与页面是两个独立 window 对象（12 起默认开启）", k: "p" },
+        { t: "sandboxed preload 的 require 只能加载 electron（及 electron/renderer、electron/common）", k: "p" },
+        { t: "Electron 45 起连 events/timers/url 的 shim 都移除了，也没有 Buffer / setImmediate", k: "p" } ] },
+      { t: "坑", k: "note", c: [
+        { t: "preload 里 import 第三方包必炸：require 加载不了文件，要么用 bundler 打进去，要么别引", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "像银行柜台：页面只能递单子（调用暴露的函数），柜员替你进金库，你拿不到金库钥匙", k: "p" } ] }
+    ]},
+    { t: "utilityProcess 工具进程", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "Main fork 出的 Node.js 子进程，官方推荐替代 child_process.fork", k: "p" },
+        { t: "适合：CPU 密集任务、易崩组件、不可信服务", k: "p" },
+        { t: "可用 MessagePort 与 Renderer 建立直连通道", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "把危险实验从办公室（Main）挪到隔壁防爆实验室：炸了也只损失一间房", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "② IPC 通信", k: "sec", c: [
+    { t: "invoke / handle（请求-响应）", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "Renderer 发 invoke(channel, ...args)，Main 用 ipcMain.handle 接住，返回 Promise", k: "p" },
+        { t: "handler 里抛错，Renderer 只拿得到 message 字符串", k: "p" },
+        { t: "参数与返回值都走结构化克隆", k: "p" } ] },
+      { t: "坑", k: "note", c: [
+        { t: "channel 名两端拼不一致 → 无人 handle → Promise 永远 pending，不报错、不超时", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "问前台「现在几点」得到一个回答 —— 一问一答，Promise 就是那个回答", k: "p" } ] }
+    ]},
+    { t: "send / on（单向消息）", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "webContents.send 是 Main → Renderer；ipcRenderer.send 是 Renderer → Main", k: "p" },
+        { t: "适合进度推送这类「一次调用、多次更新」的场景", k: "p" },
+        { t: "ipcRenderer.on 的订阅要清理（removeListener / 返回 unsubscribe）", k: "p" } ] },
+      { t: "坑", k: "note", c: [
+        { t: "订阅不清理 → 监听器累积 → 一次推送触发 N 次回调，还持有旧 state", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "像订阅外卖进度：下单一次，骑手每到一个节点推一条；用 invoke 干这事等于每 5 秒打电话问「到哪了」", k: "p" } ] }
+    ]},
+    { t: "结构化克隆", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "Electron 8 起是 IPC 唯一序列化方式（官方 breaking change），大消息性能翻倍", k: "p" },
+        { t: "函数、DOM 节点传不过去，直接抛错", k: "p" },
+        { t: "大对象跨进程 = 完整内存复制，且序列化 CPU 花在发送方主线程上", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "能把「菜谱」（数据）寄给朋友，寄不了「厨师的手」（函数）—— 所以能力对象必须在使用方现场组装", k: "p" } ] }
+    ]},
+    { t: "MessagePort 端口直连", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "Renderer 里 new MessageChannel()，用 ipcRenderer.postMessage 把一端 port 传给 Main", k: "p" },
+        { t: "Main 侧收到的是 MessagePortMain，用 Node 风格 .on(message)，且必须 .start() 才开始收", k: "p" },
+        { t: "适合持续双向数据流，也可传给 Web Worker / utilityProcess", k: "p" } ] }
+    ]},
+    { t: "禁区", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "ipcRenderer.sendSync 与 @electron/remote 会阻塞主进程，官方明确劝退", k: "p" },
+        { t: "同步 fs / 同步 child_process 同理：有异步版就不用同步版", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "③ 安全", k: "sec", c: [
+    { t: "三件套（默认就该全开）", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "contextIsolation:true（12 起默认）—— preload 与页面两个独立 window", k: "p" },
+        { t: "nodeIntegration:false —— Renderer 默认碰不到 Node", k: "p" },
+        { t: "sandbox:true（20 起默认）—— 渲染进程走 Chromium 沙箱", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "「顺手放宽」的退化：为省事开一次 nodeIntegration:true，三个月后页面里一段第三方脚本就拥有了你的整个文件系统", k: "p" } ] }
+    ]},
+    { t: "contextBridge 的正确姿势", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "exposeInMainWorld：数据是复印 + 冻结，函数是跨上下文 proxy", k: "p" },
+        { t: "官方推荐：每个 IPC 消息暴露一个专用方法，而不是把 ipcRenderer 整体交出去", k: "p" } ] },
+      { t: "坑", k: "note", c: [
+        { t: "官方反例：直接暴露 ipcRenderer 或不做参数过滤的万能 invoke —— 等于让任意网站发任意 IPC", k: "p" } ] }
+    ]},
+    { t: "外链与新窗口", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "setWindowOpenHandler 拦截所有新窗口请求，默认 deny", k: "p" },
+        { t: "确认安全的 URL 交给 shell.openExternal 用系统浏览器打开", k: "p" } ] },
+      { t: "坑", k: "note", c: [
+        { t: "官方安全文档点名：shell.openExternal 接用户可控输入，可经系统协议处理器变成任意命令执行", k: "p" } ] }
+    ]},
+    { t: "身份与入参", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "用 event.sender / event.senderFrame 校验消息来源，不信入参里的自报身份", k: "p" },
+        { t: "所有来自 Renderer 的入参都按不可信数据处理：校验、归一化、限大小", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "event.sender 是门禁刷工牌（系统发的），入参里的 toolId 是你嘴上说「我是老板」—— 门卫该信哪个？", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "④ 窗口与生命周期", k: "sec", c: [
+    { t: "创建窗口", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "webPreferences 里配 preload 与安全三件套", k: "p" },
+        { t: "dev 用 loadURL 指向 dev server；prod 用 loadFile 加载打包产物", k: "p" },
+        { t: "用 app.isPackaged 区分环境，不要用 process.env.NODE_ENV", k: "p" } ] }
+    ]},
+    { t: "关闭链路", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "close 事件可 preventDefault 拦截；closed 时窗口已销毁，拦不住", k: "p" },
+        { t: "app.quit() 路径：先发 before-quit → 尝试关所有窗 → 全关成功发 will-quit", k: "p" },
+        { t: "反直觉：Cmd+Q / app.quit() 路径下 window-all-closed 不触发（官方文档原话）", k: "p" },
+        { t: "macOS 惯例：window-all-closed 时不退出，等 activate 重建窗口", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "托盘应用退出像下班锁门：先贴「已打烊」（isQuitting=true）再拉闸（app.quit()），反了就会卡成僵尸状态", k: "p" } ] }
+    ]},
+    { t: "三种退出方式", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "app.quit()：优雅，发 before-quit / will-quit，可被窗口拦截", k: "p" },
+        { t: "app.exit()：立即退出，before-quit 和 will-quit 都不发", k: "p" },
+        { t: "win.destroy()：强制销毁窗口，不触发 close，但保证触发 closed", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "⑤ 系统能力", k: "sec", c: [
+    { t: "Tray 托盘", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "Tray 实例必须用模块级 / 全局变量持有", k: "p" },
+        { t: "官方 FAQ 原话：托盘几分钟后消失 = 变量被垃圾回收", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "像没拴绳的氢气球：函数执行完最后一根线一松，GC 这阵风就把它收走了 —— 不报错、不崩溃", k: "p" } ] }
+    ]},
+    { t: "dialog 对话框", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "showOpenDialog 返回 Promise<{ canceled, filePaths }>", k: "p" },
+        { t: "可传入父窗口变成模态对话框；filters 限文件类型", k: "p" } ] }
+    ]},
+    { t: "shell", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "openExternal 开外部链接（先校验）；showItemInFolder 在文件管理器里定位；trashItem 进回收站", k: "p" } ] }
+    ]},
+    { t: "globalShortcut 全局快捷键", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "应用不聚焦也能响应；will-quit 里 unregisterAll 释放", k: "p" } ] }
+    ]},
+    { t: "app.getPath 拿系统路径", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "userData / crashDumps / temp / logs 等都该用 app.getPath 拿", k: "p" } ] },
+      { t: "坑", k: "note", c: [
+        { t: "手写 join(userData, crashes) 是假路径 —— 真 API 是 app.getPath(crashDumps)，踩过（Bug-007）", k: "p" } ] }
+    ]},
+    { t: "Notification / clipboard / Menu", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "系统通知、剪贴板读写、应用菜单与托盘菜单，都是 Main 侧能力", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "⑥ 性能", k: "sec", c: [
+    { t: "主进程红线", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "官方性能清单第一条：任何情况下都不要阻塞主进程与 UI 线程", k: "p" },
+        { t: "三大坑：同步 IPC、@electron/remote、同步 fs / child_process", k: "p" } ] }
+    ]},
+    { t: "重计算去哪里", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "首选 worker_threads；要崩溃隔离 / 跑不可信代码用 utilityProcess；纯页面计算可用 Renderer 的 Web Worker", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "await 像「等外卖时可以干别的」，但外卖到了还得自己嚼 —— await 纯 CPU 任务，主线程照样被占满", k: "p" } ] }
+    ]},
+    { t: "大数据传输", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "大文件用 Stream + 背压，内存从 O(文件) 降到 O(块)", k: "p" },
+        { t: "跨进程大对象 = 结构化克隆完整复制；可用 Transferable 减少拷贝", k: "p" },
+        { t: "进度推送要节流（如 100ms），否则 IPC 风暴", k: "p" } ] }
+    ]},
+    { t: "内存权衡", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "hide 保留渲染进程：常驻 50-100MB/窗口，换来秒开", k: "p" },
+        { t: "destroy 释放内存，重开慢 —— 按「重开频率 × 内存压力」选", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "⑦ 打包与分发（认知版 · 阶段 6 在学）", k: "sec", c: [
+    { t: "工具链", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "electron-builder / Electron Forge 二选一；lockfile 钉死工具链版本", k: "p" } ] }
+    ]},
+    { t: "dev ≠ prod", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "dev 的启动参数（如 --no-sandbox）不会带进打包产物", k: "p" },
+        { t: "用 app.isPackaged 分叉加载逻辑；打包后要单独验证", k: "p" } ] }
+    ]},
+    { t: "自动更新三件套", k: "dec", c: [
+      { t: "要点", k: "why", c: [
+        { t: "更新源配置（app-update.yml）+ 签名校验 + 下载安装，三层各管一段", k: "p" },
+        { t: "sha512 只防传坏不防换包；签名才管「执行」那一段", k: "p" } ] }
+    ]}
+  ]}
+]};
+
+/* ============ 布局引擎 ============ */
+const vp = document.getElementById('vp');
+const stage = document.getElementById('stage');
+const canvas = document.getElementById('canvas');
+const svg = document.getElementById('links');
+const SVGNS = "http://www.w3.org/2000/svg";
+
+const HG = 52, VG = 10;
+const collapsed = new Set();
+let hitSet = new Set();
+let keepSet = new Set();
+let zoom = 1;
+let bounds = { w: 0, h: 0 };
+
+const cellKinds = new Set(['sel','rej','why','flip','note','eg']);
+const decKinds = new Set(['dec']);
+
+function visibleTree() {
+  const vis = [];
+  (function walk(n, depth, parent) {
+    n.depth = depth; n.parent = parent; n.kids = [];
+    vis.push(n);
+    if (!collapsed.has(n) && n.c && n.c.length) {
+      for (const k of n.c) { n.kids.push(k); walk(k, depth + 1, n); }
+    }
+  })(DATA, 0, null);
+  return vis;
+}
+
+function build() {
+  const nodes = visibleTree();
+  canvas.innerHTML = '';
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  canvas.appendChild(svg);
+
+  for (const n of nodes) {
+    const el = document.createElement('div');
+    const hasKids = !!(n.c && n.c.length);
+    el.className = 'node k-' + n.k + (hasKids ? ' has-kids' : '') + (hasKids && collapsed.has(n) ? ' collapsed' : '');
+    if (hitSet.size) {
+      if (hitSet.has(n)) el.classList.add('hit');
+      else if (!keepSet.has(n)) el.classList.add('dim');
+    }
+    // 标题里的换行拆成 <br>
+    const parts = String(n.t).split('\n');
+    el.textContent = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      el.appendChild(document.createElement('br'));
+      el.appendChild(document.createTextNode(parts[i]));
+    }
+    if (hasKids) {
+      el.addEventListener('click', () => {
+        if (collapsed.has(n)) collapsed.delete(n); else collapsed.add(n);
+        build();
+      });
+    }
+    n.el = el;
+    canvas.appendChild(el);
+  }
+
+  for (const n of nodes) { n.w = n.el.offsetWidth; n.h = n.el.offsetHeight; }
+
+  // 后序：子树高度
+  (function post(n) {
+    if (!n.kids.length) { n.subH = n.h; return; }
+    let s = 0;
+    n.kids.forEach((k, i) => { post(k); s += k.subH + (i ? VG : 0); });
+    n.subH = Math.max(n.h, s);
+  })(DATA);
+
+  // 前序：分配坐标
+  (function pre(n, x, top) {
+    n.x = x; n.yTop = top + (n.subH - n.h) / 2;
+    if (!n.kids.length) return;
+    let s = 0; n.kids.forEach(k => s += k.subH); s += VG * (n.kids.length - 1);
+    let cy = top + (n.subH - s) / 2;
+    for (const k of n.kids) { pre(k, n.x + n.w + HG, cy); cy += k.subH + VG; }
+  })(DATA, 0, 0);
+
+  let maxX = 0, maxY = 0;
+  for (const n of nodes) {
+    n.el.style.left = n.x + 'px';
+    n.el.style.top = n.yTop + 'px';
+    maxX = Math.max(maxX, n.x + n.w);
+    maxY = Math.max(maxY, n.yTop + n.h);
+  }
+  bounds = { w: maxX, h: maxY };
+  svg.setAttribute('width', maxX);
+  svg.setAttribute('height', maxY);
+
+  const colorOf = k => ({
+    root:'#22d3ee', sec:'#22d3ee', dec:'#93c5fd',
+    sel:'#34d399', rej:'#f87171', why:'#60a5fa', flip:'#fbbf24',
+    note:'#a78bfa', eg:'#fb923c', qa:'#22d3ee', p:'#3c4858'
+  })[k] || '#3c4858';
+
+  for (const n of nodes) {
+    for (const k of n.kids) {
+      const x1 = n.x + n.w, y1 = n.yTop + n.h / 2;
+      const x2 = k.x, y2 = k.yTop + k.h / 2;
+      const dx = Math.max(22, (x2 - x1) * 0.55);
+      const p = document.createElementNS(SVGNS, 'path');
+      p.setAttribute('d', `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', colorOf(k.k));
+      p.setAttribute('stroke-opacity', k.depth <= 2 ? 0.55 : 0.32);
+      p.setAttribute('stroke-width', k.depth <= 2 ? 1.8 : 1.2);
+      svg.appendChild(p);
+    }
+  }
+
+  applyZoom();
+  const decCount = nodes.filter(n => n.k === 'dec').length;
+  const state = qEl.value.trim() ? ` · 命中 ${hitSet.size}` + (hitSet.size ? '' : '（无结果）') : '';
+  document.getElementById('stat').textContent =
+    `7 大主题 · ${decCount} 个主题 · 可见 ${nodes.length} 节点 · 官方文档校验版` + state;
+}
+
+function applyZoom() {
+  canvas.style.transform = `scale(${zoom})`;
+  stage.style.width = Math.max(1, bounds.w * zoom) + 'px';
+  stage.style.height = Math.max(1, bounds.h * zoom) + 'px';
+}
+
+function fit() {
+  // 图上高度远大于宽度，装下全图会小到看不清；所以只对齐宽度，纵向靠滚动
+  const pad = 64;
+  zoom = Math.min(1.15, Math.max(0.35, (vp.clientWidth - pad) / Math.max(1, bounds.w)));
+  applyZoom();
+  vp.scrollLeft = 0;
+}
+
+function expandAll() { collapsed.clear(); build(); }
+function onlyCells() {
+  collapsed.clear();
+  (function walk(n) { if (n.c) { if (cellKinds.has(n.k)) collapsed.add(n); n.c.forEach(walk); } })(DATA);
+  build();
+}
+function onlyDecisions() {
+  collapsed.clear();
+  (function walk(n) { if (n.c) { if (cellKinds.has(n.k) || decKinds.has(n.k)) collapsed.add(n); n.c.forEach(walk); } })(DATA);
+  build();
+}
+
+/* 搜索 */
+const qEl = document.getElementById('q');
+function doSearch() {
+  const q = qEl.value.trim().toLowerCase();
+  hitSet = new Set(); keepSet = new Set();
+  if (!q) { build(); return; }
+  (function walk(n) {
+    if (String(n.t).toLowerCase().includes(q)) hitSet.add(n);
+    if (n.c) n.c.forEach(walk);
+  })(DATA);
+  for (const n of hitSet) {
+    let p = n.parent;
+    while (p) { keepSet.add(p); collapsed.delete(p); p = p.parent; }
+  }
+  build();
+  const first = [...hitSet][0];
+  if (first && first.el) {
+    const r = first.el.getBoundingClientRect();
+    vp.scrollTop += r.top - vp.getBoundingClientRect().top - vp.clientHeight / 2.4;
+  }
+}
+qEl.addEventListener('input', doSearch);
+qEl.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { qEl.value = ''; doSearch(); qEl.blur(); }
+});
+
+/* 拖拽平移 */
+let dragging = false, sx = 0, sy = 0, sl = 0, st = 0;
+vp.addEventListener('mousedown', e => {
+  if (e.target.closest('.node')) return;
+  dragging = true; vp.classList.add('grabbing');
+  sx = e.clientX; sy = e.clientY; sl = vp.scrollLeft; st = vp.scrollTop;
+});
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  vp.scrollLeft = sl - (e.clientX - sx);
+  vp.scrollTop = st - (e.clientY - sy);
+});
+window.addEventListener('mouseup', () => { dragging = false; vp.classList.remove('grabbing'); });
+
+/* 缩放（Ctrl + 滚轮） */
+vp.addEventListener('wheel', e => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  zoom = Math.max(0.25, Math.min(2.2, zoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+  applyZoom();
+}, { passive: false });
+
+document.getElementById('b-expand').onclick = expandAll;
+document.getElementById('b-cells').onclick = onlyCells;
+document.getElementById('b-dec').onclick = onlyDecisions;
+document.getElementById('b-fit').onclick = fit;
+document.getElementById('b-in').onclick = () => { zoom = Math.min(2.2, zoom * 1.12); applyZoom(); };
+document.getElementById('b-out').onclick = () => { zoom = Math.max(0.25, zoom / 1.12); applyZoom(); };
+
+window.addEventListener('keydown', e => {
+  if (e.target === qEl) return;
+  if (e.key === '/') { e.preventDefault(); qEl.focus(); }
+  else if (e.key === '+' || e.key === '=') { zoom = Math.min(2.2, zoom * 1.12); applyZoom(); }
+  else if (e.key === '-') { zoom = Math.max(0.25, zoom / 1.12); applyZoom(); }
+  else if (e.key === '0') fit();
+});
+
+try {
+  build();
+  fit();
+} catch (err) {
+  const box = document.createElement('pre');
+  box.style.cssText = 'position:fixed;left:16px;bottom:70px;z-index:99;color:#f87171;background:#1a1013;border:1px solid #7f1d1d;padding:10px 14px;border-radius:8px;max-width:80vw;white-space:pre-wrap';
+  box.textContent = '渲染失败：' + (err && err.message ? err.message : String(err));
+  document.body.appendChild(box);
+}
+</script>
+</body>
+</html>

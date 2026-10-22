@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Electron Toolbox · 决策链(阶段 1-5)</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
+  --sel:#34d399; --rej:#f87171; --why:#60a5fa; --flip:#fbbf24; --note:#a78bfa; --eg:#fb923c;
+  --sec:#22d3ee; --dec:#93c5fd;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:radial-gradient(1200px 780px at 18% -12%,#1a2531,#0d1117 62%);
+  color:var(--fg); overflow:hidden;
+  font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+}
+#hud{
+  position:fixed; inset:0 0 auto 0; height:54px; z-index:30;
+  display:flex; align-items:center; gap:12px; padding:0 16px;
+  background:rgba(13,17,23,.88); backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--line); white-space:nowrap;
+}
+#hud .title{font-weight:700; font-size:14px; letter-spacing:.2px}
+#hud .sub{color:var(--dim); font-size:12px}
+#hud .grow{flex:1}
+#q{
+  width:230px; padding:6px 10px; border-radius:8px; border:1px solid var(--line);
+  background:#0f151c; color:var(--fg); font-size:12.5px; outline:none;
+}
+#q:focus{border-color:#3b82f6; box-shadow:0 0 0 3px #3b82f622}
+#q::placeholder{color:#5d6874}
+button{
+  padding:6px 10px; border-radius:8px; border:1px solid var(--line);
+  background:#161d26; color:var(--fg); font-size:12px; cursor:pointer; font-family:inherit;
+}
+button:hover{background:#1e2833; border-color:#465061}
+button:active{transform:translateY(1px)}
+.chip{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--dim)}
+.chip i{width:8px; height:8px; border-radius:2px; display:inline-block}
+#vp{
+  position:absolute; inset:54px 0 0 0; overflow:auto; padding:0;
+  background-image:linear-gradient(#ffffff06 1px,transparent 1px),linear-gradient(90deg,#ffffff06 1px,transparent 1px);
+  background-size:26px 26px;
+}
+#vp.grabbing{cursor:grabbing}
+#stage{position:relative}
+#canvas{position:absolute; left:0; top:0; transform-origin:0 0}
+#links{position:absolute; left:0; top:0; overflow:visible; pointer-events:none}
+.node{
+  position:absolute; width:max-content; max-width:318px; padding:7px 11px; border-radius:10px;
+  border:1px solid var(--line); background:var(--panel);
+  transition:opacity .16s ease, box-shadow .16s ease, border-color .16s ease;
+  word-break:break-word; overflow-wrap:break-word;
+}
+.node.has-kids{cursor:pointer}
+.node.has-kids:hover{border-color:#4b5563; box-shadow:0 2px 14px #0008}
+.node.hit{box-shadow:0 0 0 2px #3b82f6, 0 0 18px #3b82f655; border-color:#3b82f6}
+.node.dim{opacity:.22}
+.node.k-root{
+  font-size:17px; font-weight:700; padding:12px 16px; max-width:330px;
+  background:linear-gradient(135deg,#1f6feb33,#22d3ee1f); border-color:#22d3ee55;
+  box-shadow:0 0 30px #22d3ee22;
+}
+.node.k-sec{
+  font-weight:700; font-size:13.5px; color:#cdf3ff; background:#10242c;
+  border-color:#1c4a55; border-left:3px solid var(--sec); max-width:250px;
+}
+.node.k-dec{
+  font-weight:600; color:#eaf2fb; background:#1a2330; border-color:#3c4a5c;
+  border-left:3px solid var(--dec); max-width:300px;
+}
+.node.k-sel{border-left:3px solid var(--sel); color:#d6fbee; background:#0f2018; font-weight:600; max-width:130px}
+.node.k-rej{border-left:3px solid var(--rej); color:#ffe4e4; background:#211415; font-weight:600; max-width:130px}
+.node.k-why{border-left:3px solid var(--why); color:#e2edff; background:#131c2b; font-weight:600; max-width:130px}
+.node.k-flip{border-left:3px solid var(--flip); color:#fff5d9; background:#241d10; font-weight:600; max-width:150px}
+.node.k-note{border-left:3px solid var(--note); color:#eee8ff; background:#1b1830; font-weight:600; max-width:150px}
+.node.k-eg{border-left:3px solid var(--eg); color:#ffedd5; background:#241a10; font-weight:600; max-width:150px}
+.node.k-qa{border-left:3px solid var(--sec); font-weight:600; background:#10242c; max-width:290px}
+.node.k-p{
+  font-size:12px; line-height:1.5; padding:6px 10px; max-width:318px;
+  background:#11171e; color:#b8c4d0; border-color:#242c36;
+}
+.node.k-p.kids-none{}
+.node.collapsed::after{content:" ▸"; color:var(--dim); font-size:11px}
+#legend{
+  position:fixed; left:16px; bottom:12px; z-index:30; display:flex; gap:14px;
+  padding:7px 12px; border-radius:10px; background:rgba(13,17,23,.85);
+  border:1px solid var(--line); backdrop-filter:blur(8px);
+}
+#hint{
+  position:fixed; right:16px; bottom:12px; z-index:30; color:#5d6874; font-size:11px;
+  background:rgba(13,17,23,.85); padding:7px 12px; border-radius:10px; border:1px solid var(--line);
+}
+kbd{background:#1e2833; border:1px solid #3a4552; border-bottom-width:2px; border-radius:4px; padding:0 4px; font:11px ui-monospace,monospace; color:#c7d2dd}
+@media (max-width:900px){ #hud .sub, #hud .chip{display:none} #q{width:150px} }
+</style>
+</head>
+<body>
+<div id="hud">
+  <span class="title">Electron Toolbox · 决策链</span>
+  <span class="sub" id="stat">阶段 1-5 · 12 个关键取舍 · 已对照官方文档校验</span>
+  <span class="grow"></span>
+  <input id="q" placeholder="搜索…（/ 聚焦，Esc 清空）" autocomplete="off">
+  <button id="b-expand">展开全部</button>
+  <button id="b-cells">只看四格</button>
+  <button id="b-dec">只看决策</button>
+  <button id="b-fit">适应宽度</button>
+  <button id="b-out">−</button>
+  <button id="b-in">+</button>
+</div>
+
+<div id="vp"><div id="stage"><div id="canvas"><svg id="links" xmlns="http://www.w3.org/2000/svg"></svg></div></div></div>
+
+<div id="legend">
+  <span class="chip"><i style="background:var(--sel)"></i>选了</span>
+  <span class="chip"><i style="background:var(--rej)"></i>否决了</span>
+  <span class="chip"><i style="background:var(--why)"></i>因为</span>
+  <span class="chip"><i style="background:var(--flip)"></i>何时翻案</span>
+  <span class="chip"><i style="background:var(--note)"></i>标注 / 易错</span>
+  <span class="chip"><i style="background:var(--eg)"></i>例子</span>
+</div>
+<div id="hint"><kbd>/</kbd> 搜索 · <kbd>Esc</kbd> 清空 · <kbd>+</kbd><kbd>-</kbd> 缩放 · 空白处拖动平移 · 点节点折叠</div>
+
+<script>
+"use strict";
+
+/* ============ 数据：只覆盖阶段 1-5 ============ */
+const DATA = {
+  t: "Electron 决策链\n阶段 1-5 · 12 个取舍", k: "root", c: [
+
+  { t: "① 信任边界 · 阶段 1-2", k: "sec", c: [
+    { t: "D1 安全三件套从头锁死 ✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "nodeIntegration:false + contextIsolation:true + preload 必填（阶段 1 空文件也建）", k: "p" },
+        { t: "dev/prod 用 !app.isPackaged 判断：dev loadURL(localhost:5173)，prod loadFile(join(app.getAppPath(),dist,index.html))", k: "p" },
+        { t: "setWindowOpenHandler + shell.openExternal 接管外链", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "nodeIntegration:true（早期 Electron 默认）", k: "p" },
+        { t: "阶段 1 图省事不建 preload 文件", k: "p" },
+        { t: "用 process.env.NODE_ENV 判断环境", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "最小权限：Renderer 必须渲染不可信数据", k: "p" },
+        { t: "安全姿势开局锁死，防后期「顺手放宽」的退化", k: "p" },
+        { t: "架构稳定：阶段 2 加 IPC 只改 preload 内部，不动窗口创建", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "不翻。收益是「省一次 IPC」，代价是「任意 XSS → 系统级入侵」，不可逆性差三个数量级", k: "p" } ] },
+      { t: "补丁", k: "note", c: [
+        { t: "contextIsolation 的真价值不是「隔离进程」，而是 Preload 与 Renderer 是两个独立 window 对象 —— 页面改不动桥那头的原件 → 防 Monkey Patching（Electron 12 起默认开启）", k: "p" },
+        { t: "exposeInMainWorld 的两种搬运：数据是「复印并冻结」，函数是「电话转接」（proxy 跨上下文调用，页面拿不到函数本体）", k: "p" },
+        { t: "shell.openExternal 绝不接用户输入：官方安全文档点名，用户可控的 URL 经系统协议处理器可变成任意命令执行", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "contextBridge 像银行柜台：你只能把单子递进窗口（调用暴露的函数），柜员替你进金库；页面永远摸不到金库钥匙（ipcRenderer 本体）", k: "p" },
+        { t: "「顺手放宽」的退化长这样：某天为了省事开了 nodeIntegration:true 调一个 API，三个月后页面里一段第三方脚本就拥有了你的整个文件系统", k: "p" } ] }
+    ]},
+
+    { t: "D2 IPC 零入参（方案 2）✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "selectAndReadFile() 不收 path，Main 内部 dialog 选完直接读", k: "p" },
+        { t: "选文件 + 读文件 = 一个原子操作，不暴露 readFile(path)", k: "p" },
+        { t: "Main 仍守 10MB 上限（纵深防御）", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "方案 1：传 path + 白名单校验", k: "p" },
+        { t: "暴露 readFile(path)，让 Renderer 自己拼路径", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "零入参 = 零攻击面：方案 1 的攻击面是「校验逻辑写得对不对」，方案 2 是空集", k: "p" },
+        { t: "合并 API 让 path 根本无缘成为攻击向量", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "出现「最近文件列表 / 从剪贴板读路径」这类必须传路径的需求时", k: "p" },
+        { t: "那时才引入 path.resolve 归一化 + 白名单目录比对 + 逐级校验，绝不把用户 path 直接交给 fs.readFile", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "零入参像餐厅点菜：你说「来一份今日特价」，厨房自己决定做什么；传 path 像你直接说「去冰箱第三层拿那块肉」—— 你得先证明你有权开冰箱、那块肉是你的、第三层没放别人的东西", k: "p" },
+        { t: "dialog.showOpenDialog 返回 { canceled, filePaths }，选完即读，路径从头到尾没离开过 Main", k: "p" } ] }
+    ]},
+
+    { t: "D3 权限身份不来自入参 ✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "三层校验：①通道存在性（没声明 fs:read → handler 根本不注册）②event.sender 来源校验 ③入参校验", k: "p" },
+        { t: "通道三段命名 tool:{toolId}:{permission}", k: "p" },
+        { t: "auditPermissions() 启动时打印权限审计表", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "用入参 args.toolId 做权限判断 —— 调用方自己填，填 system-info 就冒充成功，等于没校验", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "任何由被校验方提供的身份信息都不可信", k: "p" },
+        { t: "「没建这条路」比「拦住了」更强：前者物理上不存在，后者依赖代码写得对", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "不翻。切 B 方案后通道仍按声明注册；将来加「权限弹窗授权」，要叠加用户授权记录，而不是替换 event.sender", k: "p" } ] },
+      { t: "易错点", k: "note", c: [
+        { t: "{permission} 段是能力类别，不是 API 名。写成 tool:base64:readFile 就把「能力声明」降级成「方法名」，审计函数再也查不出影响面", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "event.sender 是门禁刷工牌 —— 卡是系统发的，你说了不算；args.toolId 是你嘴上说「我是 system-info」—— 门卫信嘴还是信卡？", k: "p" },
+        { t: "「没建这条路」像银行根本没开某个窗口，而不是开了窗口再派保安拦人 —— 保安会打盹，不存在的窗口不会", k: "p" } ] }
+    ]},
+
+    { t: "D4 编译时注册 A，不做运行时加载 B ⚠️", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "工具是源码模块，通过 import 数组注册", k: "p" },
+        { t: "shared/tool-manifest.ts 纯数据 + src/tools/index.ts 组件映射", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "B 方案：运行时 readdir + 动态 import() 扫描目录 —— 契约完全相同，只多约 100 行加载器", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "A → B 是连续迁移不是重写：契约不变，只是数据来源变", k: "p" },
+        { t: "没有权限模型的运行时加载 = 纯粹的安全漏洞，要先理解权限模型再上 B", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "工具 ≥ 10 或要开放第三方插件 → 必须切 B；切之前必须已有「运行时强制」", k: "p" } ] },
+      { t: "⚠️ 真缺口", k: "note", c: [
+        { t: "你当时只答「A 吧」，理由没给出。这是阶段 1-5 里唯一「已实现但未巩固」的决策 —— 补一句「我做 A，因为 ______」它才够格升 ✅", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "A 像「装修时就定好的固定橱柜」：结实、可检查，但添个柜子要动图纸；B 像「宜家买回家自己拼」：灵活，但快递箱里可能藏着别人塞的东西（第三方代码），所以 B 必须先有「安检门」（运行时强制）", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "② 进程与生命周期 · 阶段 3", k: "sec", c: [
+    { t: "D5 托盘常驻：拦 close，不拦 window-all-closed ✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "win.on(close) → event.preventDefault() + hide()", k: "p" },
+        { t: "模块级 let isQuitting = false 做意图标记", k: "p" },
+        { t: "app.on(before-quit) 兜底：设标记 + 销毁托盘", k: "p" },
+        { t: "window-all-closed 空实现（保留为策略声明位置）", k: "p" },
+        { t: "退出入口只留 Main（托盘菜单），Renderer 只能 hide 不能 quit", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "在 window-all-closed 里拦 —— 那时窗口已销毁，拦不住", k: "p" },
+        { t: "只在托盘菜单一处设 isQuitting —— 退出路径不止一条", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "托盘应用语义：关窗口 ≠ 退出应用", k: "p" },
+        { t: "退出路径有托盘菜单 / 系统关机 / Cmd+Q 三条，单点设置不可靠", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "非托盘应用不需要 isQuitting，直接 window-all-closed → app.quit()。别把托盘逻辑套到普通工具窗口上", k: "p" } ] },
+      { t: "顺序硬约束", k: "note", c: [
+        { t: "isQuitting = true 必须先于 app.quit()。否则 quit 同步触发的 close 里 preventDefault 中止退出，而 before-quit 已把托盘销毁 → 失去再次退出入口 → 僵尸状态（Bug-002）", k: "p" },
+        { t: "代价已量化：hide 保留渲染进程，常驻 50-100MB/窗口，「秒开」的价格", k: "p" },
+        { t: "反直觉点：Cmd+Q / app.quit() 发起的退出里 window-all-closed 根本不会触发（quit 先关窗再发 will-quit，跳过它）—— 所以把退出逻辑挂 window-all-closed 是挂错了钩子", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "退出顺序像下班锁门：要先在门口贴「今日已打烊」（isQuitting=true），再拉闸（app.quit()）；顺序反了就是闸拉到一半被保安拦下，而门口牌子已被收走 —— 谁也走不了，谁也进不来", k: "p" } ] }
+    ]},
+
+    { t: "D6 引用必须模块级持有 ✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "模块作用域 let tray: Tray | null = null", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "createTray() 函数内 const tray = new Tray()", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "函数执行完局部变量失去引用 → GC 回收 → 图标莫名消失", k: "p" },
+        { t: "它不崩溃、不报错，极易误判成「打包后图标丢了」", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "改用 WindowManager 类持有时，类实例本身仍必须被模块级变量引用 —— 本质不变", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "Tray 像没拴绳的氢气球：函数执行完，最后一根线（局部变量）一松，GC 这阵风就把它收走了 —— 官方 FAQ 原话就是「tray disappeared after a few minutes → 变量被垃圾回收」", k: "p" },
+        { t: "它不抛错、不崩、日志干净，所以极易误诊成「打包问题」；真相是 dev 下也复现，只是 GC 时机不同", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "③ 并发与资源 · 阶段 4", k: "sec", c: [
+    { t: "D7 大文件用双武器，不是一把更快的刀 ✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "createReadStream + highWaterMark 3MB + for await 背压", k: "p" },
+        { t: "Worker 线程编码（base64-worker.ts 是独立构建 entry）", k: "p" },
+        { t: "finally { await worker.terminate() }", k: "p" },
+        { t: "进度 webContents.send + ipcRenderer.on，100ms 节流", k: "p" },
+        { t: "onXxx 返回 unsubscribe，useEffect 清理里调用", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "fs.readFile 一次性读入（100MB → OOM）", k: "p" },
+        { t: "在 Main 主线程编码 —— 菜单 / 托盘 / IPC 全部无响应", k: "p" },
+        { t: "btoa：只接受字符串，非 Latin-1 抛 InvalidCharacterError", k: "p" },
+        { t: "Renderer 侧 Web Stream：读不了本地文件，还要跨 IPC 搬两次 100MB", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "两个独立瓶颈两个武器：内存 → Stream（O(文件大小) → O(块大小)）；CPU → Worker", k: "p" },
+        { t: "异步解决「等待」，不解决「计算」；await 纯 CPU 编码照样占主线程", k: "p" },
+        { t: "Main 卡死比 Renderer 卡死严重：Main 是所有窗口的公共线程", k: "p" },
+        { t: "Worker 是独立运行单元，忘登记构建 entry 就 Cannot find module", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "GB 级文件 → 边编码边落盘（当前遗留：返回值仍是完整字符串，拼接那步把内存还回去）", k: "p" },
+        { t: "高频小任务 → Worker 线程池，别一任务一线程", k: "p" },
+        { t: "大 chunk 拷贝开销 → Transferable / SharedArrayBuffer", k: "p" },
+        { t: "需要崩溃隔离 / 不可信计算 → utilityProcess.fork（官方定位：CPU 密集 + 易崩组件的独立子进程，还能用 MessagePort 直连 Renderer）", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "内存是「桌面大小」，CPU 是「手速」。Stream 是每次只搬一小盘上桌（桌面永远不乱）；Worker 是请隔壁同事帮你算（你的手不酸）", k: "p" },
+        { t: "await 像「等外卖时可以干别的」—— 但外卖到了还得自己嚼：await 一个纯 CPU 编码，等的是你自己，主线程照样被占满", k: "p" },
+        { t: "Main 卡死为什么更严重：它是「总机 + 前台」，菜单、托盘、所有窗口的 IPC 都从这里过 —— 官方性能清单第一条就是「任何情况下都不要阻塞主进程」", k: "p" } ] }
+    ]},
+
+    { t: "D8 块大小必须 3 的倍数（3145728）✅ 硬约束", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "中间块 3MB；主线程 + Worker 两层断言", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "随便取 1MB（1048576 不是 3 的倍数）", k: "p" },
+        { t: "用注释提醒「注意对齐」", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "Base64 是 3 字节 → 4 字符的分组语义", k: "p" },
+        { t: "中间块末尾带 padding 会让解码器提前终止 → 静默损坏：3.5MB 解码只剩 1MB，丢 71%", k: "p" },
+        { t: "而进度正常、膨胀率正常、输出长度正常 —— 指标全健康，数据全废（Bug-003）", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "不翻。边编码边落盘后约束依然存在，只是从「块」挪到「输出流」", k: "p" },
+        { t: "另一条边界：最后一块可以是任意长度，它的 padding 是合法的结尾", k: "p" } ] },
+      { t: "原则", k: "note", c: [
+        { t: "断言优于注释：注释会被忽略，断言在第一次运行时就拦住", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "Base64 像三人一组合影：每 3 字节凑成 4 个字符。中间块末尾凑不齐三人就垫了把椅子（= 号 padding），解码器一看到椅子就以为「合影结束了」—— 后面的人全部没拍进去，还没人喊停", k: "p" },
+        { t: "1048576（1MB）÷ 3 = 349525 余 1 —— 所以「取个整」在这里恰好是坑；3145728 = 3MB 才是 3 的倍数", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "④ 通信语义 · 阶段 2 / 4", k: "sec", c: [
+    { t: "D9 invoke 管一问一答，推送管持续状态 ✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "ipcMain.handle / ipcRenderer.invoke 做请求-响应（返回 Promise）", k: "p" },
+        { t: "webContents.send + ipcRenderer.on 做进度推送，100ms 节流", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "用 invoke 反复轮询推进度：语境错误 + IPC 风暴", k: "p" },
+        { t: "用 on/send 做需要返回值的调用", k: "p" },
+        { t: "100ms 不节流：小分块会推上千次，把通道打满", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "invoke 语义是「一次调用 → 一个返回值」，承载不了「一次调用 → 多次更新」", k: "p" },
+        { t: "方向也不同：send+on 是 Main→Renderer，invoke+handle 是 Renderer→Main，不能混用", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "当消息「过期后可以自我纠正」（鼠标位置 / 当前激活工具）→ 改「通知 + 拉取」：Main 只 send「有变化」，Renderer 收到再 invoke 拉当前值", k: "p" },
+        { t: "乱序问题在架构层直接消失，比带 seq 序号更彻底", k: "p" } ] },
+      { t: "两个沉默失败", k: "note", c: [
+        { t: "channel 名拼不一致 → 无人 handle → Promise 永远 pending，不报错、不超时", k: "p" },
+        { t: "订阅不清理 → 监听器累积 → 一次推送触发 N 次回调，卸载后仍持有旧 state（stale state）", k: "p" },
+        { t: "判据是「这条消息过期后能否自我纠正」，不是「有没有实时性要求」", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "invoke 是「问一次答一次」：你问前台「现在几点」，得到一个回答，Promise 就是这个回答", k: "p" },
+        { t: "推送是「订阅外卖进度」：下单一次，骑手每到一个节点就推一条 —— 用 invoke 干这事等于每 5 秒打一次电话问「到哪了」，电话费（IPC）爆炸", k: "p" },
+        { t: "「通知 + 拉取」像微信的「你有一条新消息」小红点：通知只说「有变化」，内容你点进去（invoke）再拉 —— 乱序了也没关系，拉到的永远是最新值", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "⑤ 扩展架构 · 阶段 5", k: "sec", c: [
+    { t: "D10 契约是双向合同 + 单一数据源 ✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "ToolManifestEntry{meta, permissions} 声明工具需要什么 + ToolContext 声明框架提供什么", k: "p" },
+        { t: "shared/tool-manifest.ts 只放纯数据，Main 与 Renderer 各自 import", k: "p" },
+        { t: "meta 与 component 分开声明", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "单向契约：工具会绕过框架直接 import(node:fs)，权限系统成废纸", k: "p" },
+        { t: "Main 存清单让 Renderer 拉：多一次往返 + 空白态 + 丢编译期校验", k: "p" },
+        { t: "Renderer 存清单让 Main 来要：循环依赖，窗口是 Main 建的", k: "p" },
+        { t: "两边各存一份：改一边忘另一边，字段内容漂移", k: "p" },
+        { t: "继续用扁平 window.electronAPI：违反最小权限", k: "p" },
+        { t: "共享文件里放 React 组件：Main 打包会拉进 React + 浏览器 API，Node 直接崩", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "单一数据源让 TypeScript 在编译期保证两端一致，不靠运行时同步", k: "p" },
+        { t: "声明/实现分离是分期演进的接口位：阶段 7 懒加载插 React.lazy()，迁 B 换加载器，契约不变只换数据来源", k: "p" },
+        { t: "meta 要全量（侧边栏列出所有工具），component 应按需懒加载", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "工具 ≥ 10 → manifest 拆多文件按类目组织 + 组件懒加载 + 侧边栏分组搜索", k: "p" },
+        { t: "要开放第三方 → 必须迁 B", k: "p" } ] },
+      { t: "接受的成本", k: "note", c: [
+        { t: "加一个工具仍要改 2 个文件（manifest 一条 + 映射一行），A 方案的固有成本", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "单一数据源像「同一份菜单同时贴在厨房和前台」：改菜只改一处，两边永远一致；各印一份就会出现「前台还在卖、厨房已下架」", k: "p" },
+        { t: "「共享文件不能放 React 组件」像「中英双语告示牌上不能写只有本地人才懂的方言梗」—— Main（Node 环境）看到 React 就直接懵了", k: "p" } ] }
+    ]},
+
+    { t: "D11 ctx 在 Renderer 组装 ✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "buildContext(permissions) 在 Renderer 裁剪：permissions: [] → ctx = {}", k: "p" },
+        { t: "Main 只负责「实现能力 + 校验」", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "Main 组装好 ctx 再传给 Renderer", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "技术约束不是选择：IPC 只传数据（结构化克隆），函数不可序列化", k: "p" },
+        { t: "ctx.fs.selectAndReadFile 这个对象必须存在于使用它的那块内存里", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "严格说不翻。即便改成 Main 下发可序列化能力清单，函数最终仍要在本地组装", k: "p" } ] },
+      { t: "两个必须区分的问句", k: "note", c: [
+        { t: "谁拥有能力（Main 实现 dialog/fs）≠ 谁持有对象（ctx 必须在 Renderer 内存）—— 这里你踩过两次", k: "p" },
+        { t: "诚实的边界：ctx 裁剪在 Renderer 执行，理论上可被 Renderer 内部代码绕过。阶段 5 是工程纪律，阶段 7 第三方面前才是安全防线", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "结构化克隆能寄「菜谱」（数据），寄不了「厨师的手」（函数）—— 函数会抛错。所以 ctx 这双手必须在 Renderer 现场长出来，Main 只能把「菜谱」（能力清单）寄过去", k: "p" },
+        { t: "结构化克隆自 Electron 8 起就是 IPC 唯一序列化方式（官方 breaking change），大消息性能还因此翻倍", k: "p" } ] }
+    ]},
+
+    { t: "D12 permissions 现在就写（哪怕拦不住）✅", k: "dec", c: [
+      { t: "选了", k: "sel", c: [
+        { t: "A 阶段就把 permissions: [fs:read] 写进 manifest", k: "p" } ] },
+      { t: "否决了", k: "rej", c: [
+        { t: "等有强制力（B 阶段）再写", k: "p" } ] },
+      { t: "因为", k: "why", c: [
+        { t: "隐式事实 → 显式声明：不读源码就知道能力使用面，上架要填能力清单", k: "p" },
+        { t: "可查询 = 可自动化：TOOL_MANIFEST.filter(...) 一行拿到受影响工具 — 影响面从「考古」变「查询」", k: "p" },
+        { t: "成本差判据：写入成本随工具数增长，读取价值立刻兑现", k: "p" } ] },
+      { t: "何时翻案", k: "flip", c: [
+        { t: "不翻。这是「成本极低 + 不可逆性极高 → 要早做」的典型", k: "p" },
+        { t: "两问句判据：①这个约束会不会变 ②不防的后果 vs 防的成本，比例多少", k: "p" } ] },
+      { t: "你的易错点", k: "note", c: [
+        { t: "曾用「工具变多难以维护」（扩展性）去论证「权限系统」（安全性）的必要性 —— 理由错位", k: "p" } ] },
+      { t: "例子", k: "eg", c: [
+        { t: "像装修时就拉好电线回路、标好每路线干嘛用 —— 哪怕暂时不装空气开关（强制力），日后装开关、查故障、加电器全都顺着标签走；入住后再砸墙布线，贵十倍", k: "p" } ] }
+    ]}
+  ]},
+
+  { t: "事实卡 · 阶段 1-5", k: "sec", c: [
+    { t: "事件与退出", k: "why", c: [
+      { t: "close 可拦（preventDefault）→ closed 已销毁不可拦 → before-quit 只能清理", k: "p" },
+      { t: "app.quit() 发起优雅退出（先发 before-quit，再尝试关所有窗，可拦）/ app.exit() 立即退出（before-quit、will-quit 都不发）/ win.destroy() 直接销毁（不触发 close，但保证触发 closed）", k: "p" },
+      { t: "window-all-closed 只在「用户自己关窗」路径触发；Cmd+Q / app.quit() 路径下不触发（官方文档原话）", k: "p" },
+      { t: "hide 保渲染进程（50-100MB，重开瞬间）/ destroy 释放内存（重开慢）", k: "p" } ] },
+    { t: "传输与计算", k: "why", c: [
+      { t: "跨进程 = 结构化克隆 = 完整内存复制：是两个进程（内存独立，必须序列化）不是两个线程；序列化跑在发送方主线程上，先付出的是 CPU 不只是内存", k: "p" },
+      { t: "结构化克隆自 Electron 8 起是 IPC 唯一序列化方式；函数、DOM 节点传不过去，直接抛错", k: "p" },
+      { t: "Base64 膨胀率 4/3 ≈ 1.333（5MB → 6.85MB 是正常设计不是 Bug），实测与理论一致", k: "p" },
+      { t: "await 让出「等待」的时间片，让不出「计算」的；JS 无抢占式调度，同步代码的危害完全由写代码的人负责", k: "p" } ] },
+    { t: "安全基线（官方文档核对）", k: "why", c: [
+      { t: "contextIsolation 自 Electron 12 起默认开启；preload 与页面是两个独立 window 对象", k: "p" },
+      { t: "sandboxed preload 的 require 只能加载 electron（Electron 45 起连 events/timers/url shim 都没了）—— 所以 preload 里 import 第三方包必炸，要么打包进去要么别引", k: "p" },
+      { t: "shell.openExternal 绝不接用户输入：用户可控 URL 经系统协议处理器可变任意命令执行（官方安全文档点名）", k: "p" },
+      { t: "官方性能清单第一条：任何情况下都不要阻塞主进程；CPU 密集 → worker threads / utilityProcess；避免同步 IPC 与 @electron/remote", k: "p" } ] }
+  ]},
+
+  { t: "待检验 · 阶段 1-5 只剩 1 条", k: "sec", c: [
+    { t: "缺口", k: "note", c: [
+      { t: "为什么选 A（编译时注册）而不是 B（运行时加载）？—— 堵在 D4 上，你当时只答「A 吧」", k: "p" },
+      { t: "复述法：合上文档，用 3 句话说清「现象 → 机制 → 所以我现在怎么写」", k: "p" } ] },
+    { t: "⚠️ 文档勘误（context7 校验发现）", k: "flip", c: [
+      { t: "knowledge-map 里 Bug-006 待检验说「sandboxed preload 的 require 白名单是 electron/events/timers/url」—— 这只对旧版成立", k: "p" },
+      { t: "Electron 45 起 events/timers/url 的 shim 被移除，sandboxed preload 的 require 只能加载 electron（及 electron/renderer、electron/common），连 Buffer/setImmediate 都没了", k: "p" },
+      { t: "结论不变（preload 里引第三方包必死），但「白名单内容」要按你实际用的 Electron 版本记 —— 这正是「环境也是变量」的又一次现身", k: "p" } ] }
+  ]},
+
+  { t: "翻案触发器 · 阶段 1-5", k: "sec", c: [
+    { t: "出现什么信号就该回头改设计", k: "flip", c: [
+      { t: "工具 ≥ 10 → manifest 拆分 + 懒加载 + 侧边栏分组（D4 / D10）", k: "p" },
+      { t: "要开放第三方 → 先有运行时强制，再切 B（D4）", k: "p" },
+      { t: "出现必须传路径的需求 → path 白名单 + resolve 归一化（D2）", k: "p" },
+      { t: "GB 级文件 → 边编码边落盘（D7）", k: "p" },
+      { t: "高频工具调用 → Worker 池替代一任务一线程（D7）", k: "p" },
+      { t: "瞬时状态类消息 → 通知 + 拉取，别用序号补丁（D9）", k: "p" },
+      { t: "多窗口 / 内存压力 → WindowManager 统一窗口策略，重新审视 hide 的 50-100MB（D5 / D6）", k: "p" } ] }
+  ]},
+
+  { t: "面试四问 · 口述练", k: "sec", c: [
+    { t: "阶段 1：为什么不让 Renderer 直接拥有 Node？不允许的话怎么调系统 API？", k: "qa", c: [
+      { t: "因为 Renderer 必须渲染不可信数据，给了 Node 就是「任意 XSS → 系统级入侵」。Preload 是受控桥：contextBridge 暴露白名单 API + 输入校验，即使被攻破也够不到系统。", k: "p" } ] },
+    { t: "阶段 3：托盘应用点退出退不掉（或窗口托盘都没了但进程还在），为什么？", k: "qa", c: [
+      { t: "退出意图标记与 app.quit() 的顺序问题：quit 同步触发 close，此时 isQuitting 仍 false → preventDefault 中止退出；而 before-quit 已销毁托盘 → 失去再次退出入口 → 僵尸状态。", k: "p" } ] },
+    { t: "阶段 4：Electron 里把 1GB 文件转 Base64 怎么做？", k: "qa", c: [
+      { t: "两个瓶颈两个武器：内存用 createReadStream + highWaterMark + for await 背压（占用恒定）；CPU 搬 Worker（Main 冻结比 Renderer 更严重）；进度 send+on 并节流；块大小必须 3 的倍数否则静默损坏。", k: "p" } ] },
+    { t: "阶段 5：如何让第三方插件只能调用它声明过的能力？", k: "qa", c: [
+      { t: "双向契约 + ctx 按 permissions 裁剪 + Main 三层校验（通道不注册 / event.sender / 入参纵深）+ 身份来自框架 + contextIsolation 阻止拿到 ipcRenderer + A 阶段只是声明，B 阶段才真正强制。", k: "p" } ] }
+  ]}
+]};
+
+/* ============ 布局引擎 ============ */
+const vp = document.getElementById('vp');
+const stage = document.getElementById('stage');
+const canvas = document.getElementById('canvas');
+const svg = document.getElementById('links');
+const SVGNS = "http://www.w3.org/2000/svg";
+
+const HG = 52, VG = 10;
+const collapsed = new Set();
+let hitSet = new Set();
+let keepSet = new Set();
+let zoom = 1;
+let bounds = { w: 0, h: 0 };
+
+const cellKinds = new Set(['sel','rej','why','flip','note','eg']);
+const decKinds = new Set(['dec']);
+
+function visibleTree() {
+  const vis = [];
+  (function walk(n, depth, parent) {
+    n.depth = depth; n.parent = parent; n.kids = [];
+    vis.push(n);
+    if (!collapsed.has(n) && n.c && n.c.length) {
+      for (const k of n.c) { n.kids.push(k); walk(k, depth + 1, n); }
+    }
+  })(DATA, 0, null);
+  return vis;
+}
+
+function build() {
+  const nodes = visibleTree();
+  canvas.innerHTML = '';
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  canvas.appendChild(svg);
+
+  for (const n of nodes) {
+    const el = document.createElement('div');
+    const hasKids = !!(n.c && n.c.length);
+    el.className = 'node k-' + n.k + (hasKids ? ' has-kids' : '') + (hasKids && collapsed.has(n) ? ' collapsed' : '');
+    if (hitSet.size) {
+      if (hitSet.has(n)) el.classList.add('hit');
+      else if (!keepSet.has(n)) el.classList.add('dim');
+    }
+    // 标题里的换行拆成 <br>
+    const parts = String(n.t).split('\n');
+    el.textContent = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      el.appendChild(document.createElement('br'));
+      el.appendChild(document.createTextNode(parts[i]));
+    }
+    if (hasKids) {
+      el.addEventListener('click', () => {
+        if (collapsed.has(n)) collapsed.delete(n); else collapsed.add(n);
+        build();
+      });
+    }
+    n.el = el;
+    canvas.appendChild(el);
+  }
+
+  for (const n of nodes) { n.w = n.el.offsetWidth; n.h = n.el.offsetHeight; }
+
+  // 后序：子树高度
+  (function post(n) {
+    if (!n.kids.length) { n.subH = n.h; return; }
+    let s = 0;
+    n.kids.forEach((k, i) => { post(k); s += k.subH + (i ? VG : 0); });
+    n.subH = Math.max(n.h, s);
+  })(DATA);
+
+  // 前序：分配坐标
+  (function pre(n, x, top) {
+    n.x = x; n.yTop = top + (n.subH - n.h) / 2;
+    if (!n.kids.length) return;
+    let s = 0; n.kids.forEach(k => s += k.subH); s += VG * (n.kids.length - 1);
+    let cy = top + (n.subH - s) / 2;
+    for (const k of n.kids) { pre(k, n.x + n.w + HG, cy); cy += k.subH + VG; }
+  })(DATA, 0, 0);
+
+  let maxX = 0, maxY = 0;
+  for (const n of nodes) {
+    n.el.style.left = n.x + 'px';
+    n.el.style.top = n.yTop + 'px';
+    maxX = Math.max(maxX, n.x + n.w);
+    maxY = Math.max(maxY, n.yTop + n.h);
+  }
+  bounds = { w: maxX, h: maxY };
+  svg.setAttribute('width', maxX);
+  svg.setAttribute('height', maxY);
+
+  const colorOf = k => ({
+    root:'#22d3ee', sec:'#22d3ee', dec:'#93c5fd',
+    sel:'#34d399', rej:'#f87171', why:'#60a5fa', flip:'#fbbf24',
+    note:'#a78bfa', eg:'#fb923c', qa:'#22d3ee', p:'#3c4858'
+  })[k] || '#3c4858';
+
+  for (const n of nodes) {
+    for (const k of n.kids) {
+      const x1 = n.x + n.w, y1 = n.yTop + n.h / 2;
+      const x2 = k.x, y2 = k.yTop + k.h / 2;
+      const dx = Math.max(22, (x2 - x1) * 0.55);
+      const p = document.createElementNS(SVGNS, 'path');
+      p.setAttribute('d', `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', colorOf(k.k));
+      p.setAttribute('stroke-opacity', k.depth <= 2 ? 0.55 : 0.32);
+      p.setAttribute('stroke-width', k.depth <= 2 ? 1.8 : 1.2);
+      svg.appendChild(p);
+    }
+  }
+
+  applyZoom();
+  const decCount = nodes.filter(n => n.k === 'dec').length;
+  const state = qEl.value.trim() ? ` · 命中 ${hitSet.size}` + (hitSet.size ? '' : '（无结果）') : '';
+  document.getElementById('stat').textContent =
+    `阶段 1-5 · ${decCount} 个取舍 · 可见 ${nodes.length} 节点 · 已对照官方文档校验` + state;
+}
+
+function applyZoom() {
+  canvas.style.transform = `scale(${zoom})`;
+  stage.style.width = Math.max(1, bounds.w * zoom) + 'px';
+  stage.style.height = Math.max(1, bounds.h * zoom) + 'px';
+}
+
+function fit() {
+  // 图上高度远大于宽度，装下全图会小到看不清；所以只对齐宽度，纵向靠滚动
+  const pad = 64;
+  zoom = Math.min(1.15, Math.max(0.35, (vp.clientWidth - pad) / Math.max(1, bounds.w)));
+  applyZoom();
+  vp.scrollLeft = 0;
+}
+
+function expandAll() { collapsed.clear(); build(); }
+function onlyCells() {
+  collapsed.clear();
+  (function walk(n) { if (n.c) { if (cellKinds.has(n.k)) collapsed.add(n); n.c.forEach(walk); } })(DATA);
+  build();
+}
+function onlyDecisions() {
+  collapsed.clear();
+  (function walk(n) { if (n.c) { if (cellKinds.has(n.k) || decKinds.has(n.k)) collapsed.add(n); n.c.forEach(walk); } })(DATA);
+  build();
+}
+
+/* 搜索 */
+const qEl = document.getElementById('q');
+function doSearch() {
+  const q = qEl.value.trim().toLowerCase();
+  hitSet = new Set(); keepSet = new Set();
+  if (!q) { build(); return; }
+  (function walk(n) {
+    if (String(n.t).toLowerCase().includes(q)) hitSet.add(n);
+    if (n.c) n.c.forEach(walk);
+  })(DATA);
+  for (const n of hitSet) {
+    let p = n.parent;
+    while (p) { keepSet.add(p); collapsed.delete(p); p = p.parent; }
+  }
+  build();
+  const first = [...hitSet][0];
+  if (first && first.el) {
+    const r = first.el.getBoundingClientRect();
+    vp.scrollTop += r.top - vp.getBoundingClientRect().top - vp.clientHeight / 2.4;
+  }
+}
+qEl.addEventListener('input', doSearch);
+qEl.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { qEl.value = ''; doSearch(); qEl.blur(); }
+});
+
+/* 拖拽平移 */
+let dragging = false, sx = 0, sy = 0, sl = 0, st = 0;
+vp.addEventListener('mousedown', e => {
+  if (e.target.closest('.node')) return;
+  dragging = true; vp.classList.add('grabbing');
+  sx = e.clientX; sy = e.clientY; sl = vp.scrollLeft; st = vp.scrollTop;
+});
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  vp.scrollLeft = sl - (e.clientX - sx);
+  vp.scrollTop = st - (e.clientY - sy);
+});
+window.addEventListener('mouseup', () => { dragging = false; vp.classList.remove('grabbing'); });
+
+/* 缩放（Ctrl + 滚轮） */
+vp.addEventListener('wheel', e => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  zoom = Math.max(0.25, Math.min(2.2, zoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+  applyZoom();
+}, { passive: false });
+
+document.getElementById('b-expand').onclick = expandAll;
+document.getElementById('b-cells').onclick = onlyCells;
+document.getElementById('b-dec').onclick = onlyDecisions;
+document.getElementById('b-fit').onclick = fit;
+document.getElementById('b-in').onclick = () => { zoom = Math.min(2.2, zoom * 1.12); applyZoom(); };
+document.getElementById('b-out').onclick = () => { zoom = Math.max(0.25, zoom / 1.12); applyZoom(); };
+
+window.addEventListener('keydown', e => {
+  if (e.target === qEl) return;
+  if (e.key === '/') { e.preventDefault(); qEl.focus(); }
+  else if (e.key === '+' || e.key === '=') { zoom = Math.min(2.2, zoom * 1.12); applyZoom(); }
+  else if (e.key === '-') { zoom = Math.max(0.25, zoom / 1.12); applyZoom(); }
+  else if (e.key === '0') fit();
+});
+
+try {
+  build();
+  fit();
+} catch (err) {
+  const box = document.createElement('pre');
+  box.style.cssText = 'position:fixed;left:16px;bottom:70px;z-index:99;color:#f87171;background:#1a1013;border:1px solid #7f1d1d;padding:10px 14px;border-radius:8px;max-width:80vw;white-space:pre-wrap';
+  box.textContent = '渲染失败：' + (err && err.message ? err.message : String(err));
+  document.body.appendChild(box);
+}
+</script>
+</body>
+</html>
